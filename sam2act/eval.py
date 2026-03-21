@@ -367,6 +367,9 @@ def eval(
                         csv_results["total_transitions"] = s.value
                     if "eval" in s.name:
                         s.name = "%s/%s" % (s.name, task_name)
+                # Fallback: if summaries didn't populate success rate, compute from task_rewards
+                if "success rate" not in csv_results and task_rewards:
+                    csv_results["success rate"] = sum(task_rewards) / len(task_rewards)
                 csv_writer.writerow(csv_results)
         else:
             for s in summaries:
@@ -374,11 +377,10 @@ def eval(
                     s.name = "%s/%s" % (s.name, task_name)
 
         if len(summaries) > 0:
-            task_score = [
-                s.value for s in summaries if f"eval_envs/return/{task_name}" in s.name
-            ][0]
+            matching = [s.value for s in summaries if f"eval_envs/return/{task_name}" in s.name]
+            task_score = matching[0] if matching else sum(task_rewards) / len(task_rewards) if task_rewards else 0.0
         else:
-            task_score = "unknown"
+            task_score = sum(task_rewards) / len(task_rewards) if task_rewards else 0.0
 
         print(f"[Evaluation] Finished {task_name} | Final Score: {task_score}\n")
 
@@ -416,16 +418,10 @@ def eval(
                         )
                     images_path = os.path.join(video_image_folder, r"%d.png")
                     os.system(
-                        "ffmpeg -i {} -vf palettegen palette.png -hide_banner -loglevel error".format(
-                            images_path
-                        )
-                    )
-                    os.system(
-                        "ffmpeg -framerate {} -i {} -i palette.png -lavfi paletteuse {} -hide_banner -loglevel error".format(
+                        "ffmpeg -y -framerate {} -i {} -c:v libx264 -crf 18 -pix_fmt yuv420p {} -hide_banner -loglevel error".format(
                             record_fps, images_path, video_path
                         )
                     )
-                    os.remove("palette.png")
                     shutil.rmtree(video_image_folder)
 
     # also add average scores at the end
