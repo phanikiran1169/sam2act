@@ -255,11 +255,11 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
         tasks,
         BATCH_SIZE_TRAIN,
         None,
-        TRAIN_REPLAY_STORAGE_DIR,               # uncomment this line if training with RLBench
-        # TRAIN_REPLAY_STORAGE_DIR_MEM,           # uncomment this line if training with MemoryBench
+        TRAIN_REPLAY_STORAGE_DIR,                # uncomment for RLBench
+        # TRAIN_REPLAY_STORAGE_DIR_MEM,          # uncomment for MemoryBench
         None,
-        DATA_FOLDER,                            # uncomment this line if training with RLBench
-        # DATA_FOLDER_MEM,                        # uncomment this line if training with MemoryBench
+        DATA_FOLDER,                             # uncomment for RLBench
+        # DATA_FOLDER_MEM,                       # uncomment for MemoryBench
         NUM_TRAIN,
         None,
         cmd_args.refresh_replay,
@@ -369,8 +369,8 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
         #     tb.update("train", i, out)
 
         if rank == 0 and node_rank == 0:
-            # TODO: add logic to only save some models
-            save_agent(agent, f"{log_dir}/model_{i}.pth", i)
+            if i % cmd_args.save_every == 0 or i == EPOCHS - 1:
+                save_agent(agent, f"{log_dir}/model_{i}.pth", i)
             save_agent(agent, f"{log_dir}/model_last.pth", i)
         i += 1
         log_iter += TRAINING_ITERATIONS
@@ -394,6 +394,8 @@ if __name__ == "__main__":
 
     parser.add_argument("--log-dir", type=str, default="runs")
     parser.add_argument("--with-eval", action="store_true", default=False)
+    parser.add_argument("--save-every", type=int, default=10,
+                        help="Save checkpoint every N epochs")
 
     cmd_args = parser.parse_args()
     del (
