@@ -1,0 +1,12 @@
+# membench.yaml: MemoryBench eval config.
+# membench.yaml: 25 test demos available per task. Paper reports mean ± std across multiple eval runs.
+
+# Eval protocol
+episodes: 25             # all available test demos
+rounds: 3                # repeat eval N times to measure variance (planner stochasticity)
+
+# Tasks
+tasks:
+  - put_block_back
+  - reopen_drawer
+  - rearrange_block

@@ -3,6 +3,7 @@
 # From: https://github.com/stepjam/YARR/blob/main/yarr/replay_buffer/wrappers/pytorch_replay_buffer.py
 
 import time
+import random
 from threading import Lock, Thread
 
 import os
@@ -17,6 +18,12 @@ from multiprocessing import Array
 from yarr.replay_buffer.replay_buffer import ReplayBuffer
 from yarr.replay_buffer.wrappers import WrappedReplayBuffer
 import time
+
+
+def _worker_init_fn(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 
 class PyTorchIterableReplayDataset(IterableDataset):
@@ -84,5 +91,6 @@ class PyTorchReplayBuffer_sync(WrappedReplayBuffer):
 
         # Batch size None disables automatic batching
         return DataLoader(d, batch_size=None, pin_memory=True,
-                          num_workers=self._num_workers)
+                          num_workers=self._num_workers,
+                          worker_init_fn=_worker_init_fn)
     

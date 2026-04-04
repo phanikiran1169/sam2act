@@ -8,6 +8,7 @@ import tqdm
 import random
 import yaml
 import argparse
+import numpy as np
 
 from collections import defaultdict
 from contextlib import redirect_stdout
@@ -250,6 +251,7 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
         mvt_cfg.num_rot, exp_cfg.peract.num_rotation_classes
     )
 
+
     t_start = time.time()
     get_dataset_func = lambda: get_dataset_temporal(
         tasks,
@@ -308,6 +310,14 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
         agent.build(training=True, device=device)
     else:
         assert False, "Incorrect agent"
+
+    # Rank-offset seed for data pipeline — each GPU samples different data.
+    # Placed after model init so shared seed (Phase 1) controls weight init.
+    # Uses node_rank (global rank) for multi-node uniqueness.
+    rank_seed = cmd_args.seed + node_rank
+    torch.manual_seed(rank_seed)
+    np.random.seed(rank_seed)
+    random.seed(rank_seed)
 
     start_epoch = 0
     end_epoch = EPOCHS
@@ -407,6 +417,8 @@ if __name__ == "__main__":
 
     parser.add_argument("--log-dir", type=str, default="runs")
     parser.add_argument("--with-eval", action="store_true", default=False)
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed for reproducibility")
 
     cmd_args = parser.parse_args()
     del (
@@ -436,6 +448,15 @@ if __name__ == "__main__":
             init_method=dist_url,
             world_size=world_size,
             rank=rank)
+
+    # Reproducibility: shared seed for identical model init across ranks
+    SEED = cmd_args.seed
+    torch.manual_seed(SEED)
+    torch.cuda.manual_seed_all(SEED)
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
     try:
         # Pass the LOCAL_RANK to the experiment function

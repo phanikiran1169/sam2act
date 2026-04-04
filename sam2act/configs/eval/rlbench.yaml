@@ -1,0 +1,10 @@
+# rlbench.yaml: RLBench eval config.
+# rlbench.yaml: 5 episodes per task per round (paper Table 2). Multiple rounds for mean ± std.
+
+# Eval protocol
+episodes: 5              # episodes per task per round
+rounds: 3                # repeat eval N times to measure variance
+
+# Default model
+model: model_89.pth
+model_folder: runs/sam2act_rlbench
