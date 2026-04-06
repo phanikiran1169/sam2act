@@ -309,6 +309,9 @@ class Task(object):
             raise FileNotFoundError(
                 'The following is not a valid task .ttm file: %s' % ttm_file)
         self._base_object = self.pyrep.import_model(ttm_file)
+        # Rename root dummy to match task name (allows .ttm file copies)
+        if self._base_object.get_name() != self.name:
+            self._base_object.set_name(self.name)
         return self._base_object
 
     def unload(self) -> None:
@@ -332,7 +335,8 @@ class Task(object):
         self._waypoint_abilities_end = {}
 
     def get_base(self) -> Dummy:
-        self._base_object = Dummy(self.name)
+        if self._base_object is None:
+            self._base_object = Dummy(self.name)
         return self._base_object
 
     def get_state(self) -> Tuple[bytes, int]:
