@@ -1,0 +1,37 @@
+# all21_accum.yaml: 21 tasks with gradient accumulation (2 steps).
+# all21_accum.yaml: BS=32/GPU, accum=2, 2 GPUs → effective BS=128, LR=1.6e-3.
+
+# Tasks (18 RLBench + 3 MemoryBench — same as all21.yaml)
+tasks: put_item_in_drawer,reach_and_drag,turn_tap,slide_block_to_color_target,open_drawer,put_groceries_in_cupboard,place_shape_in_shape_sorter,put_money_in_safe,push_buttons,close_jar,stack_blocks,place_cups,place_wine_at_rack_location,light_bulb_in,sweep_to_dustpan_of_size,insert_onto_square_peg,meat_off_grill,stack_cups,put_block_back,reopen_drawer,rearrange_block
+exp_name: 21tasks
+
+# Training hyperparameters
+bs: 32                            # per-GPU batch size
+epochs: 90
+base_lr: 1.25e-5                  # LR scaling: effective_lr = base_lr * bs * gpus * accum = 1.6e-3
+steps_per_epoch: 625              # optimizer steps per epoch
+warmup_steps: 2000
+gradient_accumulation_steps: 2    # accumulate 2 micro-batches per optimizer step
+
+# Effective training (2 GPUs):
+#   Effective BS:          32 * 2 GPUs * 2 accum = 128
+#   Effective LR:          1.25e-5 * 128 = 1.6e-3
+#   Optimizer steps/epoch: 625
+#   Micro-steps/epoch:     1250
+#   Total optimizer steps: 56,250
+#   Comparison:            #26 had BS=64/LR=8e-4, paper has BS=256/LR=3.2e-3
+
+# Model config
+use_memory: false
+num_maskmem: 9
+
+# Data
+sample_distribution_mode: task_uniform
+
+# Scripts
+train_script: train.py
+exp_cfg: configs/sam2act.yaml
+mvt_cfg: mvt/configs/sam2act.yaml
+
+# Seed
+seed: 42

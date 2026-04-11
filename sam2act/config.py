@@ -18,7 +18,8 @@ _C.num_workers = 0
 # 'transition_uniform' or 'task_uniform'
 _C.sample_distribution_mode = 'transition_uniform'
 _C.train_iter = 16 * 10000
-
+# gradient accumulation: effective bs = bs * num_devices * gradient_accumulation_steps
+_C.gradient_accumulation_steps = 1
 
 _C.exp_name = 'test'
 _C.demo = 100

@@ -6,7 +6,7 @@ tasks: put_item_in_drawer,reach_and_drag,turn_tap,slide_block_to_color_target,op
 exp_name: 21tasks
 
 # Training hyperparameters (paper Table 5)
-bs: 8                    # per-GPU batch size
+bs: 32                   # per-GPU batch size
 epochs: 90
 base_lr: 1.25e-5         # LR scaling rule: effective_lr = base_lr × bs × gpus
 steps_per_epoch: 625
