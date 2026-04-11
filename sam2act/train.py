@@ -211,7 +211,7 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
     old_exp_cfg_peract_lr = exp_cfg.peract.lr
     old_exp_cfg_exp_id = exp_cfg.exp_id
 
-    exp_cfg.peract.lr *= world_size * exp_cfg.bs
+    exp_cfg.peract.lr *= world_size * exp_cfg.bs * exp_cfg.gradient_accumulation_steps
     # if cmd_args.exp_cfg_opts != "":
     #     exp_cfg.exp_id += f"_{short_name(cmd_args.exp_cfg_opts)}"
     # if cmd_args.mvt_cfg_opts != "":
@@ -224,8 +224,8 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
     # Things to change
     BATCH_SIZE_TRAIN = exp_cfg.bs
     NUM_TRAIN = exp_cfg.demo
-    # to match peract, iterations per epoch
-    TRAINING_ITERATIONS = int(exp_cfg.train_iter // (exp_cfg.bs * world_size))
+    # to match peract, iterations per epoch (micro-steps; multiply by accum for more forward passes)
+    TRAINING_ITERATIONS = int(exp_cfg.train_iter // (exp_cfg.bs * world_size)) * exp_cfg.gradient_accumulation_steps
     EPOCHS = exp_cfg.epochs
     TRAIN_REPLAY_STORAGE_DIR = "replay_temporal/replay_train"
     TRAIN_REPLAY_STORAGE_DIR_MEM = "replay_temporal_memory/replay_train"
@@ -300,7 +300,8 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
             scene_bounds=SCENE_BOUNDS,
             cameras=CAMERAS,
             log_dir=f"{log_dir}/test_run/",
-            cos_dec_max_step=EPOCHS * TRAINING_ITERATIONS,
+            cos_dec_max_step=EPOCHS * TRAINING_ITERATIONS // exp_cfg.gradient_accumulation_steps,
+            gradient_accumulation_steps=exp_cfg.gradient_accumulation_steps,
             **exp_cfg.peract,
             **exp_cfg.rvt,
         )

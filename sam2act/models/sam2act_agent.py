@@ -326,6 +326,7 @@ class SAM2Act_Agent:
         same_trans_aug_per_seq: bool = False,
         use_memory: bool = False,
         num_maskmem: int = 7,
+        gradient_accumulation_steps: int = 1,
     ):
         """
         :param gt_hm_sigma: the std of the groundtruth hm, currently for for
@@ -389,6 +390,7 @@ class SAM2Act_Agent:
 
         self.use_memory = use_memory
         self._num_maskmem = num_maskmem
+        self.gradient_accumulation_steps = gradient_accumulation_steps
 
     def build(self, training: bool, device: torch.device = None):
         self._training = training
@@ -817,18 +819,32 @@ class SAM2Act_Agent:
                     total_loss = trans_loss
 
 
-            self._optimizer.zero_grad(set_to_none=True)
-            self.scaler.scale(total_loss).backward()
+            # Save unscaled loss for logging before dividing
+            total_loss_for_log = total_loss.item()
 
-            # self.scaler.unscale_(self._optimizer)
-            # torch.nn.utils.clip_grad_norm_(self._network.parameters(), max_norm=0.1)
+            # Average gradients across accumulation window
+            total_loss = total_loss / self.gradient_accumulation_steps
 
-            self.scaler.step(self._optimizer)
-            self.scaler.update()
-            self._lr_sched.step()
+            # Zero gradients at start of each accumulation window
+            if step % self.gradient_accumulation_steps == 0:
+                self._optimizer.zero_grad(set_to_none=True)
+
+            # Backward — skip DDP all-reduce on non-final micro-steps
+            is_accumulating = (step + 1) % self.gradient_accumulation_steps != 0
+            if is_accumulating and isinstance(self._network, DistributedDataParallel):
+                with self._network.no_sync():
+                    self.scaler.scale(total_loss).backward()
+            else:
+                self.scaler.scale(total_loss).backward()
+
+            # Step optimizer only at end of accumulation window
+            if not is_accumulating:
+                self.scaler.step(self._optimizer)
+                self.scaler.update()
+                self._lr_sched.step()
 
             loss_log = {
-                "total_loss": total_loss.item(),
+                "total_loss": total_loss_for_log,
                 "trans_loss": trans_loss.item(),
                 "rot_loss_x": rot_loss_x.item() if not self.use_memory else None,
                 "rot_loss_y": rot_loss_y.item() if not self.use_memory else None,
