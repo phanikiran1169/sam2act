@@ -13,10 +13,10 @@ from sam2act.utils.peract_utils import (
     SCENE_BOUNDS,
     EPISODE_FOLDER,
     VARIATION_DESCRIPTIONS_PKL,
-    DEMO_AUGMENTATION_EVERY_N,
     ROTATION_RESOLUTION,
     VOXEL_SIZES,
 )
+from sam2act.utils.replay_buffer_config import build_per_task_dict
 from yarr.replay_buffer.wrappers.pytorch_replay_buffer import PyTorchReplayBuffer
 
 
@@ -34,7 +34,14 @@ def get_dataset(
     num_workers,
     only_train,
     sample_distribution_mode="transition_uniform",
+    demo_aug_every_n_per_task=None,
 ):
+    # Resolve per-task augmentation from replay_buffer.yaml if not provided
+    if demo_aug_every_n_per_task is None:
+        demo_aug_every_n_per_task = build_per_task_dict(tasks)
+    missing = [t for t in tasks if t not in demo_aug_every_n_per_task]
+    if missing:
+        raise ValueError(f"demo_aug_every_n_per_task missing tasks: {missing}")
 
     train_replay_buffer = create_replay(
         batch_size=BATCH_SIZE_TRAIN,
@@ -92,7 +99,7 @@ def get_dataset(
             start_idx=0,
             num_demos=NUM_TRAIN,
             demo_augmentation=True,
-            demo_augmentation_every_n=DEMO_AUGMENTATION_EVERY_N,
+            demo_augmentation_every_n=demo_aug_every_n_per_task[task],
             cameras=CAMERAS,
             rlbench_scene_bounds=SCENE_BOUNDS,
             voxel_sizes=VOXEL_SIZES,
@@ -114,7 +121,7 @@ def get_dataset(
                 start_idx=0,
                 num_demos=NUM_VAL,
                 demo_augmentation=True,
-                demo_augmentation_every_n=DEMO_AUGMENTATION_EVERY_N,
+                demo_augmentation_every_n=demo_aug_every_n_per_task[task],
                 cameras=CAMERAS,
                 rlbench_scene_bounds=SCENE_BOUNDS,
                 voxel_sizes=VOXEL_SIZES,
@@ -171,7 +178,14 @@ def get_dataset_temporal(
     sample_distribution_mode="transition_uniform",
     val_from_train=False,
     val_start_idx=0,
+    demo_aug_every_n_per_task=None,
 ):
+    # Resolve per-task augmentation from replay_buffer.yaml if not provided
+    if demo_aug_every_n_per_task is None:
+        demo_aug_every_n_per_task = build_per_task_dict(tasks)
+    missing = [t for t in tasks if t not in demo_aug_every_n_per_task]
+    if missing:
+        raise ValueError(f"demo_aug_every_n_per_task missing tasks: {missing}")
 
     train_replay_buffer = create_replay_temporal(
         batch_size=BATCH_SIZE_TRAIN,
@@ -231,7 +245,7 @@ def get_dataset_temporal(
             start_idx=0,
             num_demos=NUM_TRAIN,
             demo_augmentation=True,
-            demo_augmentation_every_n=DEMO_AUGMENTATION_EVERY_N,
+            demo_augmentation_every_n=demo_aug_every_n_per_task[task],
             cameras=CAMERAS,
             rlbench_scene_bounds=SCENE_BOUNDS,
             voxel_sizes=VOXEL_SIZES,
@@ -255,7 +269,7 @@ def get_dataset_temporal(
                 start_idx=val_sidx,
                 num_demos=NUM_VAL,
                 demo_augmentation=True,
-                demo_augmentation_every_n=DEMO_AUGMENTATION_EVERY_N,
+                demo_augmentation_every_n=demo_aug_every_n_per_task[task],
                 cameras=CAMERAS,
                 rlbench_scene_bounds=SCENE_BOUNDS,
                 voxel_sizes=VOXEL_SIZES,

@@ -15,6 +15,7 @@ requirements = [
     "pyrender",
     "transformers",
     "omegaconf",
+    "pyyaml",
     "natsort",
     "cffi",
     "pandas",

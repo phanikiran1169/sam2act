@@ -1,0 +1,11 @@
+# replay_buffer.yaml: Per-task replay buffer augmentation settings.
+# replay_buffer.yaml: `demo_augmentation_every_n` — sample every N-th frame from demos as augmentation starting points.
+
+# Default value used for any task not listed in `tasks` below.
+default: 10
+
+# Per-task overrides. Keys must match task names exactly.
+# Higher N = fewer transitions per demo = each transition seen more often per epoch.
+tasks:
+  # stack_and_swap: 24 waypoints, 400 demos. N=50 targets ~2-3x seen/epoch repetition.
+  stack_and_swap: 50
