@@ -169,6 +169,8 @@ def get_dataset_temporal(
     num_maskmem,
     rank,
     sample_distribution_mode="transition_uniform",
+    val_from_train=False,
+    val_start_idx=0,
 ):
 
     train_replay_buffer = create_replay_temporal(
@@ -244,12 +246,13 @@ def get_dataset_temporal(
         )
 
         if not only_train:
-            # print("----- Test Buffer -----")
+            val_data_path = data_path_train if val_from_train else data_path_val
+            val_sidx = val_start_idx if val_from_train else 0
             fill_replay_temporal(
                 replay=test_replay_buffer,
                 task=task,
                 task_replay_storage_folder=test_replay_storage_folder,
-                start_idx=0,
+                start_idx=val_sidx,
                 num_demos=NUM_VAL,
                 demo_augmentation=True,
                 demo_augmentation_every_n=DEMO_AUGMENTATION_EVERY_N,
@@ -258,11 +261,12 @@ def get_dataset_temporal(
                 voxel_sizes=VOXEL_SIZES,
                 rotation_resolution=ROTATION_RESOLUTION,
                 crop_augmentation=False,
-                data_path=data_path_val,
+                data_path=val_data_path,
                 episode_folder=EPISODE_FOLDER,
                 variation_desriptions_pkl=VARIATION_DESCRIPTIONS_PKL,
                 clip_model=clip_model,
                 device=device,
+                rank=rank,
             )
 
     # delete the CLIP model since we have already extracted language features

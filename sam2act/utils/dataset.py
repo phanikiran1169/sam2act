@@ -698,7 +698,8 @@ def fill_replay_temporal(
 
     disk_exist = False
     if replay._disk_saving:
-        if os.path.exists(task_replay_storage_folder):
+        replay_info_path = os.path.join(task_replay_storage_folder, "replay_info.npy")
+        if os.path.exists(task_replay_storage_folder) and os.path.exists(replay_info_path):
             if rank == 0:
                 print(
                     "[Info] Replay dataset already exists in the disk: {}".format(

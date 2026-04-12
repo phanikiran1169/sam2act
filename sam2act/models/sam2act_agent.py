@@ -851,6 +851,58 @@ class SAM2Act_Agent:
             )
 
         loss_log = {}
+        if not backprop:
+            # Compute loss without backprop for validation metrics
+            with torch.no_grad():
+                trans_loss_per_elem = self._cross_entropy_loss(q_trans, action_trans)
+                trans_loss = trans_loss_per_elem.mean()
+                rot_loss_x = rot_loss_y = rot_loss_z = 0.0
+                grip_loss = 0.0
+                collision_loss = 0.0
+                if not self.use_memory and self.add_rgc_loss:
+                    nrc = self._num_rotation_classes
+                    rot_loss_x = self._cross_entropy_loss(
+                        rot_q[:, 0*nrc:1*nrc], action_rot_x_one_hot.argmax(-1)).mean()
+                    rot_loss_y = self._cross_entropy_loss(
+                        rot_q[:, 1*nrc:2*nrc], action_rot_y_one_hot.argmax(-1)).mean()
+                    rot_loss_z = self._cross_entropy_loss(
+                        rot_q[:, 2*nrc:3*nrc], action_rot_z_one_hot.argmax(-1)).mean()
+                    grip_loss = self._cross_entropy_loss(
+                        grip_q, action_grip_one_hot.argmax(-1)).mean()
+                    collision_loss = self._cross_entropy_loss(
+                        collision_q, action_collision_one_hot.argmax(-1)).mean()
+                total_loss = (trans_loss + rot_loss_x + rot_loss_y + rot_loss_z
+                              + grip_loss + collision_loss)
+                loss_log = {
+                    "total_loss": total_loss.item(),
+                    "trans_loss": trans_loss.item(),
+                    "rot_loss_x": rot_loss_x.item() if not self.use_memory else None,
+                    "rot_loss_y": rot_loss_y.item() if not self.use_memory else None,
+                    "rot_loss_z": rot_loss_z.item() if not self.use_memory else None,
+                    "grip_loss": grip_loss.item() if not self.use_memory else None,
+                    "collision_loss": collision_loss.item() if not self.use_memory else None,
+                    "lr": self._optimizer.param_groups[0]["lr"],
+                }
+                manage_loss_log(self, loss_log, reset_log=reset_log)
+                return_out.update(loss_log)
+
+                if getattr(self, '_enable_diagnostics', True):
+                    kp_idx = replay_sample.get("keypoint_idx", None)
+                    manage_diag_log(
+                        agent=self, tasks=tasks, keypoint_idx=kp_idx,
+                        per_elem_trans_loss=trans_loss_per_elem,
+                        q_trans=q_trans, action_trans=action_trans,
+                        rot_q=rot_q if not self.use_memory else None,
+                        action_rot_x_oh=action_rot_x_one_hot if not self.use_memory else None,
+                        action_rot_y_oh=action_rot_y_one_hot if not self.use_memory else None,
+                        action_rot_z_oh=action_rot_z_one_hot if not self.use_memory else None,
+                        grip_q=grip_q if not self.use_memory else None,
+                        action_grip_oh=action_grip_one_hot if not self.use_memory else None,
+                        use_memory=self.use_memory,
+                        num_rot_classes=self._num_rotation_classes,
+                        reset_log=reset_log,
+                    )
+
         if backprop:
             with autocast(enabled=self.amp):
                 # cross-entropy loss

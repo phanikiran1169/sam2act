@@ -138,6 +138,55 @@ def train(agent, dataset, training_iterations, log_iter, rank=0, node_rank=0, if
     return log
 
 
+def validate(agent, dataset, val_iterations, rank=0, node_rank=0, ifwandb=False, log_step=0):
+    data_iter = iter(dataset)
+
+    for iteration in tqdm.tqdm(range(val_iterations), desc="Validation", position=0, leave=True):
+        raw_batch = next(data_iter)
+        batch = {
+            k: v.to(agent._device)
+            for k, v in raw_batch.items()
+            if type(v) == torch.Tensor
+        }
+        batch["tasks"] = raw_batch["tasks"]
+        batch["lang_goal"] = raw_batch["lang_goal"]
+        agent.update(
+            step=iteration,
+            replay_sample=batch,
+            backprop=False,
+            reset_log=(iteration == 0),
+            eval_log=True,
+        )
+
+    # Collect val metrics
+    val_metrics = {}
+    if hasattr(agent, 'loss_log'):
+        for key in ['total_loss', 'trans_loss', 'rot_loss_x', 'rot_loss_y',
+                     'rot_loss_z', 'grip_loss', 'collision_loss']:
+            vals = agent.loss_log.get(key, [])
+            if vals and vals[-1] is not None:
+                val_metrics[f"val/{key}"] = sum(vals) / len(vals)
+
+    if hasattr(agent, 'diag_log'):
+        diag = get_diag_summary(agent, window=val_iterations)
+        for k, v in diag.items():
+            val_metrics[f"val/{k}"] = v
+
+    if hasattr(agent, 'eval_trans'):
+        eval_log = print_eval_log(agent)
+        for k, v in eval_log.items():
+            val_metrics[f"val/{k}"] = v
+
+    if rank == 0:
+        avg_loss = val_metrics.get("val/trans_loss", 0)
+        print(f"  Val trans_loss: {avg_loss:.4f}")
+
+    if ifwandb and node_rank == 0:
+        wandb.log(data=val_metrics, step=log_step)
+
+    return val_metrics
+
+
 def save_agent(agent, path, epoch):
     model = agent._network
     optimizer = agent._optimizer
@@ -228,13 +277,15 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
 
     # Things to change
     BATCH_SIZE_TRAIN = exp_cfg.bs
-    NUM_TRAIN = exp_cfg.demo
+    VAL_DEMOS = cmd_args.val_demos
+    NUM_TRAIN = exp_cfg.demo - VAL_DEMOS
     # to match peract, iterations per epoch (micro-steps; multiply by accum for more forward passes)
     TRAINING_ITERATIONS = int(exp_cfg.train_iter // (exp_cfg.bs * world_size)) * exp_cfg.gradient_accumulation_steps
     EPOCHS = exp_cfg.epochs
     TRAIN_REPLAY_STORAGE_DIR = "replay_temporal/replay_train"
     TRAIN_REPLAY_STORAGE_DIR_MEM = "replay_temporal_memory/replay_train"
-    # TEST_REPLAY_STORAGE_DIR = "replay/replay_val"
+    VAL_REPLAY_STORAGE_DIR = "replay_temporal/replay_val"
+    VAL_REPLAY_STORAGE_DIR_MEM = "replay_temporal_memory/replay_val"
     log_dir = get_logdir(cmd_args, exp_cfg)
     tasks = get_tasks(exp_cfg)
 
@@ -257,26 +308,30 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
     )
 
     t_start = time.time()
+    _only_train = (VAL_DEMOS == 0)
     get_dataset_func = lambda: get_dataset_temporal(
         tasks,
         BATCH_SIZE_TRAIN,
-        None,
+        BATCH_SIZE_TRAIN,
         TRAIN_REPLAY_STORAGE_DIR,                # uncomment for RLBench
         # TRAIN_REPLAY_STORAGE_DIR_MEM,          # uncomment for MemoryBench
-        None,
+        VAL_REPLAY_STORAGE_DIR if not _only_train else None,  # uncomment for RLBench
+        # VAL_REPLAY_STORAGE_DIR_MEM if not _only_train else None,  # uncomment for MemoryBench
         DATA_FOLDER,                             # uncomment for RLBench
         # DATA_FOLDER_MEM,                       # uncomment for MemoryBench
         NUM_TRAIN,
-        None,
+        VAL_DEMOS if not _only_train else None,
         cmd_args.refresh_replay,
         device,
         num_workers=exp_cfg.num_workers,
-        only_train=True,
+        only_train=_only_train,
         sample_distribution_mode=exp_cfg.sample_distribution_mode,
         num_maskmem=mvt_cfg.num_maskmem,
         rank=rank,
+        val_from_train=True,
+        val_start_idx=NUM_TRAIN,
     )
-    train_dataset, _ = get_dataset_func()
+    train_dataset, val_dataset = get_dataset_func()
     t_end = time.time()
 
     if rank == 0:
@@ -380,8 +435,15 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
 
         out = train(agent, train_dataset, TRAINING_ITERATIONS, log_iter, rank, node_rank, ifwandb=exp_cfg.wandb)
 
-        # if rank == 0:
-        #     tb.update("train", i, out)
+        # Validation
+        if val_dataset is not None and rank == 0:
+            if (i + 1) % cmd_args.val_every == 0 or i == end_epoch - 1:
+                print(f"Epoch [{i}]: Running validation")
+                val_iters = min(100, TRAINING_ITERATIONS // 4)
+                validate(agent, val_dataset, val_iters,
+                         rank, node_rank, ifwandb=exp_cfg.wandb,
+                         log_step=log_iter + TRAINING_ITERATIONS - 1)
+        dist.barrier()
 
         if rank == 0 and node_rank == 0:
             if i % cmd_args.save_every == 0 or i == EPOCHS - 1:
@@ -413,6 +475,10 @@ if __name__ == "__main__":
                         help="Save checkpoint every N epochs")
     parser.add_argument("--seed", type=int, default=42,
                         help="Random seed for reproducibility")
+    parser.add_argument("--val-demos", type=int, default=20,
+                        help="Number of demos held out for validation (0 disables)")
+    parser.add_argument("--val-every", type=int, default=1,
+                        help="Run validation every N epochs")
 
     cmd_args = parser.parse_args()
     del (
