@@ -275,16 +275,28 @@ def print_loss_log(agent):
 def manage_diag_log(agent, tasks, keypoint_idx, per_elem_trans_loss,
                     q_trans, action_trans, rot_q, action_rot_x_oh,
                     action_rot_y_oh, action_rot_z_oh, grip_q, action_grip_oh,
-                    use_memory, num_rot_classes, reset_log=False):
-    """Per-task and per-waypoint training diagnostics from detached tensors."""
+                    use_memory, num_rot_classes, reset_log=False,
+                    per_elem_total_loss=None):
+    """Per-task and per-waypoint training diagnostics from detached tensors.
+
+    `per_elem_trans_loss` has shape (bs, nc) — the raw translation CE output.
+    `per_elem_total_loss` has shape (bs,) — per-sample sum of all active loss
+    components (trans + rot + grip + collision in Stage 0/1, or trans alone
+    in Stage 2). When None, falls back to the trans loss alone.
+    """
     from collections import defaultdict
     if not hasattr(agent, 'diag_log') or reset_log:
         agent.diag_log = {k: defaultdict(list) for k in
-                          ["task_loss", "task_pixel_match", "task_grip_match",
+                          ["task_trans_loss", "task_total_loss",
+                           "task_pixel_match", "task_grip_match",
                            "task_rot_match", "wp_pixel_match"]}
         agent.diag_log["prev_window"] = {}
 
-    elem_loss = per_elem_trans_loss.mean(dim=1)  # (bs, nc) -> (bs,)
+    elem_trans = per_elem_trans_loss.mean(dim=1)  # (bs, nc) -> (bs,)
+    if per_elem_total_loss is None:
+        elem_total = elem_trans
+    else:
+        elem_total = per_elem_total_loss
     elem_pixel = (q_trans.argmax(dim=1) == action_trans.argmax(dim=1)).float().mean(dim=1)
 
     elem_grip = elem_rot = None
@@ -300,10 +312,11 @@ def manage_diag_log(agent, tasks, keypoint_idx, per_elem_trans_loss,
     WP_BINS = [(0, 4), (5, 9), (10, 14), (15, 19), (20, 999)]
 
     for task in set(tasks):
-        mask = torch.tensor([t == task for t in tasks], device=elem_loss.device)
+        mask = torch.tensor([t == task for t in tasks], device=elem_trans.device)
         if mask.sum() == 0:
             continue
-        agent.diag_log["task_loss"][task].append(elem_loss[mask].mean().item())
+        agent.diag_log["task_trans_loss"][task].append(elem_trans[mask].mean().item())
+        agent.diag_log["task_total_loss"][task].append(elem_total[mask].mean().item())
         agent.diag_log["task_pixel_match"][task].append(elem_pixel[mask].mean().item())
         if elem_grip is not None:
             agent.diag_log["task_grip_match"][task].append(elem_grip[mask].mean().item())
@@ -318,36 +331,49 @@ def manage_diag_log(agent, tasks, keypoint_idx, per_elem_trans_loss,
 
 
 def get_diag_summary(agent, window=200):
-    """Rolling window per-task diagnostics with convergence detection."""
+    """Rolling window per-task diagnostics with convergence detection.
+
+    Emits `{task}/trans_loss` (translation CE only) and `{task}/total_loss`
+    (sum of all active loss components). In Stage 2 these are equal because
+    rot/grip/collision heads are frozen.
+
+    The convergence detector tracks `{task}/total_loss` since that is the
+    quantity being optimized.
+    """
     d = agent.diag_log
     out = {}
     min_samples = 50
     print("--- per-task diagnostics ---")
-    for task in sorted(d["task_loss"].keys()):
-        vals = d["task_loss"][task]
+    for task in sorted(d["task_total_loss"].keys()):
+        vals = d["task_total_loss"][task]
         if len(vals) < min_samples:
             continue
-        cur_loss = np.mean(vals[-window:])
+        cur_total = np.mean(vals[-window:])
+        cur_trans = np.mean(d["task_trans_loss"][task][-window:])
         cur_pm = np.mean(d["task_pixel_match"][task][-window:])
         cur_gm = np.mean(d["task_grip_match"][task][-window:]) if d["task_grip_match"].get(task) else None
         cur_rm = np.mean(d["task_rot_match"][task][-window:]) if d["task_rot_match"].get(task) else None
 
         prev = d["prev_window"].get(task, {})
-        prev_loss = prev.get("loss", cur_loss)
+        prev_total = prev.get("total_loss", cur_total)
         if len(vals) < window * 2:
             status = "WARMING"
-        elif cur_loss < prev_loss * 0.97:
+        elif cur_total < prev_total * 0.97:
             status = "CONVERGING"
-        elif cur_loss > prev_loss * 1.03:
+        elif cur_total > prev_total * 1.03:
             status = "DIVERGING"
         else:
             status = "STALLED"
 
-        d["prev_window"][task] = {"loss": cur_loss}
+        d["prev_window"][task] = {"total_loss": cur_total}
         gm_str = f" g_match={cur_gm:.3f}" if cur_gm is not None else ""
         rm_str = f" r_match={cur_rm:.3f}" if cur_rm is not None else ""
-        print(f"  {task}: loss={cur_loss:.4f} px_match={cur_pm:.3f}{gm_str}{rm_str} [{status}]")
-        out[f"{task}/loss"] = cur_loss
+        print(
+            f"  {task}: total={cur_total:.4f} trans={cur_trans:.4f} "
+            f"px_match={cur_pm:.3f}{gm_str}{rm_str} [{status}]"
+        )
+        out[f"{task}/total_loss"] = cur_total
+        out[f"{task}/trans_loss"] = cur_trans
         out[f"{task}/pixel_match"] = cur_pm
         if cur_gm is not None:
             out[f"{task}/grip_match"] = cur_gm
@@ -855,22 +881,36 @@ class SAM2Act_Agent:
             # Compute loss without backprop for validation metrics
             with torch.no_grad():
                 trans_loss_per_elem = self._cross_entropy_loss(q_trans, action_trans)
-                trans_loss = trans_loss_per_elem.mean()
+                trans_loss_per_sample = trans_loss_per_elem.mean(dim=1)  # (bs,)
+                trans_loss = trans_loss_per_sample.mean()
+                # Running per-sample total for the diag log. Starts as trans;
+                # other components are added below when they are computed.
+                total_per_sample = trans_loss_per_sample
                 rot_loss_x = rot_loss_y = rot_loss_z = 0.0
                 grip_loss = 0.0
                 collision_loss = 0.0
                 if not self.use_memory and self.add_rgc_loss:
                     nrc = self._num_rotation_classes
-                    rot_loss_x = self._cross_entropy_loss(
-                        rot_q[:, 0*nrc:1*nrc], action_rot_x_one_hot.argmax(-1)).mean()
-                    rot_loss_y = self._cross_entropy_loss(
-                        rot_q[:, 1*nrc:2*nrc], action_rot_y_one_hot.argmax(-1)).mean()
-                    rot_loss_z = self._cross_entropy_loss(
-                        rot_q[:, 2*nrc:3*nrc], action_rot_z_one_hot.argmax(-1)).mean()
-                    grip_loss = self._cross_entropy_loss(
-                        grip_q, action_grip_one_hot.argmax(-1)).mean()
-                    collision_loss = self._cross_entropy_loss(
-                        collision_q, action_collision_one_hot.argmax(-1)).mean()
+                    rot_x_per_sample = self._cross_entropy_loss(
+                        rot_q[:, 0*nrc:1*nrc], action_rot_x_one_hot.argmax(-1))
+                    rot_y_per_sample = self._cross_entropy_loss(
+                        rot_q[:, 1*nrc:2*nrc], action_rot_y_one_hot.argmax(-1))
+                    rot_z_per_sample = self._cross_entropy_loss(
+                        rot_q[:, 2*nrc:3*nrc], action_rot_z_one_hot.argmax(-1))
+                    grip_per_sample = self._cross_entropy_loss(
+                        grip_q, action_grip_one_hot.argmax(-1))
+                    collision_per_sample = self._cross_entropy_loss(
+                        collision_q, action_collision_one_hot.argmax(-1))
+                    rot_loss_x = rot_x_per_sample.mean()
+                    rot_loss_y = rot_y_per_sample.mean()
+                    rot_loss_z = rot_z_per_sample.mean()
+                    grip_loss = grip_per_sample.mean()
+                    collision_loss = collision_per_sample.mean()
+                    total_per_sample = (
+                        trans_loss_per_sample
+                        + rot_x_per_sample + rot_y_per_sample + rot_z_per_sample
+                        + grip_per_sample + collision_per_sample
+                    )
                 total_loss = (trans_loss + rot_loss_x + rot_loss_y + rot_loss_z
                               + grip_loss + collision_loss)
                 loss_log = {
@@ -901,50 +941,68 @@ class SAM2Act_Agent:
                         use_memory=self.use_memory,
                         num_rot_classes=self._num_rotation_classes,
                         reset_log=reset_log,
+                        per_elem_total_loss=total_per_sample,
                     )
 
         if backprop:
             with autocast(enabled=self.amp):
                 # cross-entropy loss
                 trans_loss_per_elem = self._cross_entropy_loss(q_trans, action_trans)  # (bs, nc)
-                trans_loss = trans_loss_per_elem.mean()
+                trans_loss_per_sample = trans_loss_per_elem.mean(dim=1)  # (bs,)
+                trans_loss = trans_loss_per_sample.mean()
+                # Running per-sample total (detached copy for diagnostics).
+                total_per_sample = trans_loss_per_sample.detach()
                 rot_loss_x = rot_loss_y = rot_loss_z = 0.0
                 grip_loss = 0.0
                 collision_loss = 0.0
                 if not self.use_memory:
                     if self.add_rgc_loss:
-                        rot_loss_x = self._cross_entropy_loss(
+                        rot_x_per_sample = self._cross_entropy_loss(
                             rot_q[
                                 :,
                                 0 * self._num_rotation_classes : 1 * self._num_rotation_classes,
                             ],
                             action_rot_x_one_hot.argmax(-1),
-                        ).mean()
+                        )
+                        rot_loss_x = rot_x_per_sample.mean()
 
-                        rot_loss_y = self._cross_entropy_loss(
+                        rot_y_per_sample = self._cross_entropy_loss(
                             rot_q[
                                 :,
                                 1 * self._num_rotation_classes : 2 * self._num_rotation_classes,
                             ],
                             action_rot_y_one_hot.argmax(-1),
-                        ).mean()
+                        )
+                        rot_loss_y = rot_y_per_sample.mean()
 
-                        rot_loss_z = self._cross_entropy_loss(
+                        rot_z_per_sample = self._cross_entropy_loss(
                             rot_q[
                                 :,
                                 2 * self._num_rotation_classes : 3 * self._num_rotation_classes,
                             ],
                             action_rot_z_one_hot.argmax(-1),
-                        ).mean()
+                        )
+                        rot_loss_z = rot_z_per_sample.mean()
 
-                        grip_loss = self._cross_entropy_loss(
+                        grip_per_sample = self._cross_entropy_loss(
                             grip_q,
                             action_grip_one_hot.argmax(-1),
-                        ).mean()
+                        )
+                        grip_loss = grip_per_sample.mean()
 
-                        collision_loss = self._cross_entropy_loss(
+                        collision_per_sample = self._cross_entropy_loss(
                             collision_q, action_collision_one_hot.argmax(-1)
-                        ).mean()
+                        )
+                        collision_loss = collision_per_sample.mean()
+
+                        total_per_sample = (
+                            trans_loss_per_sample.detach()
+                            + rot_x_per_sample.detach()
+                            + rot_y_per_sample.detach()
+                            + rot_z_per_sample.detach()
+                            + grip_per_sample.detach()
+                            + collision_per_sample.detach()
+                        )
 
                     total_loss = (
                         trans_loss
@@ -1012,6 +1070,7 @@ class SAM2Act_Agent:
                     use_memory=self.use_memory,
                     num_rot_classes=self._num_rotation_classes,
                     reset_log=reset_log,
+                    per_elem_total_loss=total_per_sample,
                 )
 
         if eval_log:
