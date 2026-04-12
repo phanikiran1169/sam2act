@@ -272,6 +272,94 @@ def print_loss_log(agent):
     return out
 
 
+def manage_diag_log(agent, tasks, keypoint_idx, per_elem_trans_loss,
+                    q_trans, action_trans, rot_q, action_rot_x_oh,
+                    action_rot_y_oh, action_rot_z_oh, grip_q, action_grip_oh,
+                    use_memory, num_rot_classes, reset_log=False):
+    """Per-task and per-waypoint training diagnostics from detached tensors."""
+    from collections import defaultdict
+    if not hasattr(agent, 'diag_log') or reset_log:
+        agent.diag_log = {k: defaultdict(list) for k in
+                          ["task_loss", "task_pixel_match", "task_grip_match",
+                           "task_rot_match", "wp_pixel_match"]}
+        agent.diag_log["prev_window"] = {}
+
+    elem_loss = per_elem_trans_loss.mean(dim=1)  # (bs, nc) -> (bs,)
+    elem_pixel = (q_trans.argmax(dim=1) == action_trans.argmax(dim=1)).float().mean(dim=1)
+
+    elem_grip = elem_rot = None
+    if not use_memory and grip_q is not None and rot_q is not None:
+        elem_grip = (grip_q.argmax(-1) == action_grip_oh.argmax(-1)).float()
+        nrc = num_rot_classes
+        elem_rot = (
+            (rot_q[:, 0*nrc:1*nrc].argmax(-1) == action_rot_x_oh.argmax(-1)).float() +
+            (rot_q[:, 1*nrc:2*nrc].argmax(-1) == action_rot_y_oh.argmax(-1)).float() +
+            (rot_q[:, 2*nrc:3*nrc].argmax(-1) == action_rot_z_oh.argmax(-1)).float()
+        ) / 3.0
+
+    WP_BINS = [(0, 4), (5, 9), (10, 14), (15, 19), (20, 999)]
+
+    for task in set(tasks):
+        mask = torch.tensor([t == task for t in tasks], device=elem_loss.device)
+        if mask.sum() == 0:
+            continue
+        agent.diag_log["task_loss"][task].append(elem_loss[mask].mean().item())
+        agent.diag_log["task_pixel_match"][task].append(elem_pixel[mask].mean().item())
+        if elem_grip is not None:
+            agent.diag_log["task_grip_match"][task].append(elem_grip[mask].mean().item())
+            agent.diag_log["task_rot_match"][task].append(elem_rot[mask].mean().item())
+
+        if keypoint_idx is not None:
+            for lo, hi in WP_BINS:
+                wp_mask = mask & (keypoint_idx >= lo) & (keypoint_idx <= hi)
+                if wp_mask.any():
+                    agent.diag_log["wp_pixel_match"][f"{task}/wp_{lo}-{hi}"].append(
+                        elem_pixel[wp_mask].mean().item())
+
+
+def get_diag_summary(agent, window=200):
+    """Rolling window per-task diagnostics with convergence detection."""
+    d = agent.diag_log
+    out = {}
+    min_samples = 50
+    print("--- per-task diagnostics ---")
+    for task in sorted(d["task_loss"].keys()):
+        vals = d["task_loss"][task]
+        if len(vals) < min_samples:
+            continue
+        cur_loss = np.mean(vals[-window:])
+        cur_pm = np.mean(d["task_pixel_match"][task][-window:])
+        cur_gm = np.mean(d["task_grip_match"][task][-window:]) if d["task_grip_match"].get(task) else None
+        cur_rm = np.mean(d["task_rot_match"][task][-window:]) if d["task_rot_match"].get(task) else None
+
+        prev = d["prev_window"].get(task, {})
+        prev_loss = prev.get("loss", cur_loss)
+        if len(vals) < window * 2:
+            status = "WARMING"
+        elif cur_loss < prev_loss * 0.97:
+            status = "CONVERGING"
+        elif cur_loss > prev_loss * 1.03:
+            status = "DIVERGING"
+        else:
+            status = "STALLED"
+
+        d["prev_window"][task] = {"loss": cur_loss}
+        gm_str = f" g_match={cur_gm:.3f}" if cur_gm is not None else ""
+        rm_str = f" r_match={cur_rm:.3f}" if cur_rm is not None else ""
+        print(f"  {task}: loss={cur_loss:.4f} px_match={cur_pm:.3f}{gm_str}{rm_str} [{status}]")
+        out[f"{task}/loss"] = cur_loss
+        out[f"{task}/pixel_match"] = cur_pm
+        if cur_gm is not None:
+            out[f"{task}/grip_match"] = cur_gm
+        if cur_rm is not None:
+            out[f"{task}/rot_match"] = cur_rm
+
+    for key, vals in d["wp_pixel_match"].items():
+        if len(vals) >= min_samples:
+            out[key] = np.mean(vals[-window:])
+    return out
+
+
 def horizon_loss_cal(output, data_horizon):
 
     shape = output.shape
@@ -766,7 +854,8 @@ class SAM2Act_Agent:
         if backprop:
             with autocast(enabled=self.amp):
                 # cross-entropy loss
-                trans_loss = self._cross_entropy_loss(q_trans, action_trans).mean()
+                trans_loss_per_elem = self._cross_entropy_loss(q_trans, action_trans)  # (bs, nc)
+                trans_loss = trans_loss_per_elem.mean()
                 rot_loss_x = rot_loss_y = rot_loss_z = 0.0
                 grip_loss = 0.0
                 collision_loss = 0.0
@@ -855,6 +944,23 @@ class SAM2Act_Agent:
             }
             manage_loss_log(self, loss_log, reset_log=reset_log)
             return_out.update(loss_log)
+
+            if getattr(self, '_enable_diagnostics', True):
+                kp_idx = replay_sample.get("keypoint_idx", None)
+                manage_diag_log(
+                    agent=self, tasks=tasks, keypoint_idx=kp_idx,
+                    per_elem_trans_loss=trans_loss_per_elem.detach(),
+                    q_trans=q_trans.detach(), action_trans=action_trans.detach(),
+                    rot_q=rot_q.detach() if not self.use_memory else None,
+                    action_rot_x_oh=action_rot_x_one_hot if not self.use_memory else None,
+                    action_rot_y_oh=action_rot_y_one_hot if not self.use_memory else None,
+                    action_rot_z_oh=action_rot_z_one_hot if not self.use_memory else None,
+                    grip_q=grip_q.detach() if not self.use_memory else None,
+                    action_grip_oh=action_grip_one_hot if not self.use_memory else None,
+                    use_memory=self.use_memory,
+                    num_rot_classes=self._num_rotation_classes,
+                    reset_log=reset_log,
+                )
 
         if eval_log:
             with torch.no_grad():

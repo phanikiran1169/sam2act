@@ -27,7 +27,7 @@ import sam2act.utils.ddp_utils as ddp_utils
 import sam2act.mvt.config as mvt_cfg_mod
 
 import sam2act.mvt.mvt_sam2 as mvt_sam2
-from sam2act.models.sam2act_agent import print_eval_log, print_loss_log
+from sam2act.models.sam2act_agent import print_eval_log, print_loss_log, get_diag_summary
 from sam2act.utils.get_dataset import get_dataset, get_dataset_temporal
 from sam2act.utils.rvt_utils import (
     TensorboardManager,
@@ -123,8 +123,13 @@ def train(agent, dataset, training_iterations, log_iter, rank=0, node_rank=0, if
                                     # 'grip_loss': loss_log['grip_loss'][iteration],
                                     # 'collision_loss': loss_log['collision_loss'][iteration],
                                     'lr': loss_log['lr'][iteration],
-                                    }, 
+                                    },
                             step = log_iter)
+
+            if hasattr(agent, 'diag_log'):
+                diag_dict = get_diag_summary(agent)
+                if ifwandb and node_rank == 0:
+                    wandb.log(data=diag_dict, step=log_iter)
 
         log_iter += 1
 
