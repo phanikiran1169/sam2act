@@ -140,6 +140,12 @@ def train(agent, dataset, training_iterations, log_iter, rank=0, node_rank=0, if
 
 
 def validate(agent, dataset, val_iterations, rank=0, node_rank=0, ifwandb=False, log_step=0):
+    # NOTE: validation intentionally runs with the model in train mode.
+    # Calling agent.eval() here would trigger asserts on rot_x_y and would
+    # switch stage-two from teacher-forced to closed-loop inference, which
+    # measures a different quantity than training loss. BN running stats
+    # drift is possible but small given train/val come from the same demos.
+    # A proper eval-mode val wrapper is tracked as a follow-up.
     data_iter = iter(dataset)
 
     for iteration in tqdm.tqdm(range(val_iterations), desc="Validation", position=0, leave=True):
@@ -451,7 +457,16 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
         if val_dataset is not None and rank == 0:
             if (i + 1) % cmd_args.val_every == 0 or i == end_epoch - 1:
                 print(f"Epoch [{i}]: Running validation")
-                val_iters = min(100, TRAINING_ITERATIONS // 4)
+                # Cap val_iters by the val dataset size so enumerate mode
+                # does not wrap around mid-pass and double-count transitions.
+                # Random-mode val datasets have no fixed size (len() raises
+                # AttributeError / TypeError); fall back to the hardcoded cap.
+                # Floor at 1 so a tiny training config still triggers reset_log.
+                try:
+                    val_dataset_len = len(val_dataset)
+                except (TypeError, AttributeError):
+                    val_dataset_len = 100
+                val_iters = max(1, min(100, TRAINING_ITERATIONS // 4, val_dataset_len))
                 validate(agent, val_dataset, val_iters,
                          rank, node_rank, ifwandb=exp_cfg.wandb,
                          log_step=log_iter + TRAINING_ITERATIONS - 1)
