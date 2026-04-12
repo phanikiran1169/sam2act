@@ -151,10 +151,15 @@ def get_dataset(
     if only_train:
         test_dataset = None
     else:
+        # Val uses random sampling with task_uniform distribution so every
+        # task is represented proportionally. Enumerate mode walks tasks in
+        # insertion order and would under-sample any task beyond the first
+        # when val_iters * batch_size < first-task transition count.
         test_wrapped_replay = PyTorchReplayBuffer(
             test_replay_buffer,
-            sample_mode="enumerate",
+            sample_mode="random",
             num_workers=num_workers,
+            sample_distribution_mode="task_uniform",
         )
         test_dataset = test_wrapped_replay.dataset()
     return train_dataset, test_dataset
@@ -300,10 +305,15 @@ def get_dataset_temporal(
     if only_train:
         test_dataset = None
     else:
+        # Val uses random sampling with task_uniform distribution so every
+        # task is represented proportionally. Enumerate mode walks tasks in
+        # insertion order and would under-sample any task beyond the first
+        # when val_iters * batch_size < first-task transition count.
         test_wrapped_replay = PyTorchReplayBuffer(
             test_replay_buffer,
-            sample_mode="enumerate",
+            sample_mode="random",
             num_workers=num_workers,
+            sample_distribution_mode="task_uniform",
         )
         test_dataset = test_wrapped_replay.dataset()
     return train_dataset, test_dataset
