@@ -27,6 +27,10 @@ from yarr.agents.agent import ActResult
 from sam2act.utils.dataset import _clip_encode_text
 from sam2act.utils.lr_sched_utils import GradualWarmupScheduler
 
+# Waypoint index bins for per-waypoint-group diagnostic metrics.
+# Each element (lo, hi) is inclusive on both sides.
+WP_BINS = [(0, 4), (5, 9), (10, 14), (15, 19), (20, 999)]
+
 
 def eval_con(gt, pred):
     assert gt.shape == pred.shape, print(f"{gt.shape} {pred.shape}")
@@ -308,8 +312,6 @@ def manage_diag_log(agent, tasks, keypoint_idx, per_elem_trans_loss,
             (rot_q[:, 1*nrc:2*nrc].argmax(-1) == action_rot_y_oh.argmax(-1)).float() +
             (rot_q[:, 2*nrc:3*nrc].argmax(-1) == action_rot_z_oh.argmax(-1)).float()
         ) / 3.0
-
-    WP_BINS = [(0, 4), (5, 9), (10, 14), (15, 19), (20, 999)]
 
     for task in set(tasks):
         mask = torch.tensor([t == task for t in tasks], device=elem_trans.device)
@@ -930,18 +932,18 @@ class SAM2Act_Agent:
                     kp_idx = replay_sample.get("keypoint_idx", None)
                     manage_diag_log(
                         agent=self, tasks=tasks, keypoint_idx=kp_idx,
-                        per_elem_trans_loss=trans_loss_per_elem,
-                        q_trans=q_trans, action_trans=action_trans,
-                        rot_q=rot_q if not self.use_memory else None,
+                        per_elem_trans_loss=trans_loss_per_elem.detach(),
+                        q_trans=q_trans.detach(), action_trans=action_trans.detach(),
+                        rot_q=rot_q.detach() if not self.use_memory else None,
                         action_rot_x_oh=action_rot_x_one_hot if not self.use_memory else None,
                         action_rot_y_oh=action_rot_y_one_hot if not self.use_memory else None,
                         action_rot_z_oh=action_rot_z_one_hot if not self.use_memory else None,
-                        grip_q=grip_q if not self.use_memory else None,
+                        grip_q=grip_q.detach() if not self.use_memory else None,
                         action_grip_oh=action_grip_one_hot if not self.use_memory else None,
                         use_memory=self.use_memory,
                         num_rot_classes=self._num_rotation_classes,
                         reset_log=reset_log,
-                        per_elem_total_loss=total_per_sample,
+                        per_elem_total_loss=total_per_sample.detach(),
                     )
 
         if backprop:

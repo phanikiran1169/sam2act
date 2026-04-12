@@ -283,6 +283,9 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
     # Things to change
     BATCH_SIZE_TRAIN = exp_cfg.bs
     VAL_DEMOS = cmd_args.val_demos
+    assert 0 <= VAL_DEMOS < exp_cfg.demo, (
+        f"--val-demos {VAL_DEMOS} must be in [0, {exp_cfg.demo})"
+    )
     NUM_TRAIN = exp_cfg.demo - VAL_DEMOS
     # to match peract, iterations per epoch (micro-steps; multiply by accum for more forward passes)
     TRAINING_ITERATIONS = int(exp_cfg.train_iter // (exp_cfg.bs * world_size)) * exp_cfg.gradient_accumulation_steps
