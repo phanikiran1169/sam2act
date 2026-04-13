@@ -393,7 +393,7 @@ def _add_keypoints_to_replay(
         obs_dict = extract_obs(      #  obs is the i_th frame
             obs,
             CAMERAS,
-            t=k - next_keypoint_idx,     # t for calculate time, represent t_th keypoint
+            t=k,     # t: absolute keypoint index, matches eval's self._i
             prev_action=prev_action,
             episode_length=25,
         )
@@ -444,7 +444,7 @@ def _add_keypoints_to_replay(
     obs_dict_tp1 = extract_obs(
         obs_tp1,
         CAMERAS,
-        t=k + 1 - next_keypoint_idx,
+        t=k + 1,
         prev_action=prev_action,
         episode_length=25,
     )
@@ -612,7 +612,7 @@ def _add_keypoints_to_replay_temporal(
         obs_dict = extract_obs(      #  obs is the i_th frame
             obs,
             CAMERAS,
-            t=k - next_keypoint_idx,     # t for calculate time, represent t_th keypoint
+            t=k,     # t: absolute keypoint index, matches eval's self._i
             prev_action=prev_action,
             episode_length=25,
         )
@@ -664,7 +664,7 @@ def _add_keypoints_to_replay_temporal(
     obs_dict_tp1 = extract_obs(
         obs_tp1,
         CAMERAS,
-        t=k + 1 - next_keypoint_idx,
+        t=k + 1,
         prev_action=prev_action,
         episode_length=25,
     )
