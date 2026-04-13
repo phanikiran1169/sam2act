@@ -32,6 +32,25 @@ from sam2act.utils.lr_sched_utils import GradualWarmupScheduler
 WP_BINS = [(0, 4), (5, 9), (10, 14), (15, 19), (20, 999)]
 
 
+def _normalize_step_idx(raw, device):
+    """Normalize a keypoint index from any source to a [B] int64 tensor.
+
+    The replay buffer stores ``keypoint_idx`` as a flat [B] extra element, but
+    at eval time the rollout generator wraps every observation value as
+    ``torch.tensor(np.array([v]))`` which can produce [1, 1] or deeper shapes
+    depending on what the env returns. This helper flattens any shape to [B]
+    and casts to int64 on the target device. Returns None if the input is None
+    so callers can cleanly bypass the step-embedding branch.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, torch.Tensor):
+        t = raw
+    else:
+        t = torch.as_tensor(raw)
+    return t.to(device).long().reshape(-1)
+
+
 def eval_con(gt, pred):
     assert gt.shape == pred.shape, print(f"{gt.shape} {pred.shape}")
     assert len(gt.shape) == 2
@@ -508,6 +527,11 @@ class SAM2Act_Agent:
         self._num_maskmem = num_maskmem
         self.gradient_accumulation_steps = gradient_accumulation_steps
 
+        # Agent-side keypoint counter used by the learnable step embedding.
+        # Reset to 0 on every rollout via reset(); incremented in act() when
+        # the env does not supply its own keypoint_idx.
+        self._current_step = 0
+
     def build(self, training: bool, device: torch.device = None):
         self._training = training
         self._device = device
@@ -729,6 +753,12 @@ class SAM2Act_Agent:
         tasks = replay_sample["tasks"]
 
         proprio = arm_utils.stack_on_channel(replay_sample["low_dim_state"])  # (b, 4)
+        # Absolute keypoint index (0..N-1) for the learnable step embedding.
+        # Stored as a flat [B] ReplayElement in utils/dataset.py, so skip
+        # stack_on_channel (which expects [B, T, C]) and normalize directly.
+        step_idx = _normalize_step_idx(
+            replay_sample.get("keypoint_idx", None), proprio.device
+        )
         return_out = {}
 
         obs, pcd = peract_utils._preprocess_inputs(replay_sample, self.cameras)
@@ -867,6 +897,7 @@ class SAM2Act_Agent:
                 img_aug=img_aug,
                 wpt_local=wpt_local if self._network.training else None,
                 rot_x_y=rot_x_y if self.rot_ver == 1 else None,
+                step_idx=step_idx,  # consumed by MVT_SAM2_Single when use_step_embedding
                 # hm_gt=hm_gt,
             )
 
@@ -1110,6 +1141,10 @@ class SAM2Act_Agent:
     def act(
         self, step: int, observation: dict, deterministic=True, pred_distri=False
     ) -> ActResult:
+        # Note: the `step` argument is bound to rollout_generator's
+        # step_signal.value which is never incremented (stays at -1). We ignore
+        # it and use an agent-side counter (_current_step) instead. See
+        # plans/modular-coalescing-lampson.md for details.
         if self.add_lang:
             lang_goal_tokens = observation.get("lang_goal_tokens", None).long()
             _, lang_goal_embs = _clip_encode_text(self.clip_model, lang_goal_tokens[0])
@@ -1122,6 +1157,16 @@ class SAM2Act_Agent:
             )
 
         proprio = arm_utils.stack_on_channel(observation["low_dim_state"])
+
+        # Resolve step_idx for the optional learnable step embedding. Prefer
+        # the env-provided keypoint_idx (if the env exposes it), otherwise
+        # fall back to the agent-side counter which resets in reset() and
+        # increments once per act() call.
+        raw_step = observation.get("keypoint_idx", None)
+        env_provided_step = raw_step is not None
+        if not env_provided_step:
+            raw_step = torch.tensor([self._current_step], dtype=torch.long)
+        step_idx = _normalize_step_idx(raw_step, proprio.device)
 
         obs, pcd = peract_utils._preprocess_inputs(observation, self.cameras)
         pc, img_feat = rvt_utils.get_pc_img_feat(
@@ -1157,7 +1202,13 @@ class SAM2Act_Agent:
             proprio=proprio,
             lang_emb=lang_goal_embs,
             img_aug=0,  # no img augmentation while acting
+            step_idx=step_idx,
         )
+        # Advance the agent-side counter only if the env didn't provide one.
+        # Agent counter assumes act() is called exactly once per keypoint in
+        # order (true for all current eval loops).
+        if not env_provided_step:
+            self._current_step += 1
         _, rot_q, grip_q, collision_q, y_q, _ = self.get_q(
             out, dims=(bs, nc, h, w), only_pred=True, get_q_trans=False
         )
@@ -1329,7 +1380,11 @@ class SAM2Act_Agent:
         return action_trans_hm
 
     def reset(self):
-        pass
+        # Reset the agent-side keypoint counter used by the learnable step
+        # embedding. Called at the start of every eval episode by
+        # rollout_generator.generator(). Training path does not touch this
+        # field — the replay buffer supplies keypoint_idx directly.
+        self._current_step = 0
 
     def eval(self):
         self._network.eval()

@@ -93,6 +93,9 @@ class MVT_SAM2(nn.Module):
         sam2_ckpt,
         use_memory,
         num_maskmem,
+        use_step_embedding=False,
+        step_embedding_freq_size=32,
+        step_embedding_max_period=10000,
         renderer_device="cuda:0",
     ):
         """MultiView Transfomer
@@ -443,6 +446,7 @@ class MVT_SAM2(nn.Module):
         img_aug=0,
         wpt_local=None,
         rot_x_y=None,
+        step_idx=None,
         # hm_gt=None,
         **kwargs,
     ):
@@ -456,6 +460,9 @@ class MVT_SAM2(nn.Module):
         :param wpt_local: gt location of the wpt in 3D, tensor of shape
             (bs, 3)
         :param rot_x_y: (bs, 2) rotation in x and y direction
+        :param step_idx: optional [B] int64 tensor of absolute keypoint
+            indices. Only passed to mvt1 (Stage 0) — mvt2 (memory stage) is
+            intentionally left unchanged.
         """
         self.verify_inp(
             pc=pc,
@@ -493,6 +500,7 @@ class MVT_SAM2(nn.Module):
             lang_emb=lang_emb,
             wpt_local=wpt_local_stage_one,
             rot_x_y=rot_x_y,
+            step_idx=step_idx,  # Stage 0 only — memory stage (mvt2) intentionally omitted
             # hm_gt=hm_gt,
             **kwargs,
         )

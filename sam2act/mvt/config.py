@@ -58,6 +58,12 @@ _C.num_maskmem = 7
 _C.sam2_config = '/configs/sam2.1/sam2.1_hiera_b+'
 _C.sam2_ckpt = './mvt/sam2_train/checkpoints/sam2.1_hiera_base_plus.pt'
 
+# Learnable step embedding (Stage 0 only, additive on proprio features).
+# See plans/modular-coalescing-lampson.md for rationale.
+_C.use_step_embedding = False
+_C.step_embedding_freq_size = 32
+_C.step_embedding_max_period = 10000
+
 def get_cfg_defaults():
     """Get a yacs CfgNode object with default values for my_project."""
     return _C.clone()
