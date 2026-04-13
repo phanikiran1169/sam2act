@@ -60,9 +60,13 @@ _C.sam2_ckpt = './mvt/sam2_train/checkpoints/sam2.1_hiera_base_plus.pt'
 
 # Learnable step embedding (Stage 0 only, additive on proprio features).
 # See plans/modular-coalescing-lampson.md for rationale.
+# max_period=100 gives meaningfully distinct embeddings across 0..24 keypoints
+# (cos(step0, step12) ~= 0.33 vs 0.72 at 10000). MemoryVLA uses 10000 because
+# its input range is diffusion denoising timesteps (0..1000), which is the
+# wrong regime for a 24-waypoint manipulation task.
 _C.use_step_embedding = False
 _C.step_embedding_freq_size = 32
-_C.step_embedding_max_period = 10000
+_C.step_embedding_max_period = 100
 
 def get_cfg_defaults():
     """Get a yacs CfgNode object with default values for my_project."""

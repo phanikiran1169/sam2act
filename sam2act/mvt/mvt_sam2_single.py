@@ -357,6 +357,13 @@ class MVT_SAM2_Single(nn.Module):
                 frequency_embedding_size=step_embedding_freq_size,
                 max_period=step_embedding_max_period,
             )
+            # Learnable scale so the model balances step vs proprio contribution.
+            # proprio_preprocess outputs with norm ~6 after GroupNorm+LReLU while
+            # the step embedder produces norm ~1 at init — without this the
+            # model would see a 7x smaller positional signal than gripper state.
+            # Starting alpha at 1.0 preserves the initial `p + step_emb` behavior
+            # so the model can scale up (emphasize phase) or down (ignore it).
+            self.step_embedding_alpha = nn.Parameter(torch.ones(1))
 
         self.patchify = Conv2DBlock(
             7 if self.ifsep else 10,
@@ -796,9 +803,11 @@ class MVT_SAM2_Single(nn.Module):
             p = self.proprio_preprocess(proprio)  # [B,4] -> [B,32]
             # Additive step embedding (positional-encoding style) — only active
             # when use_step_embedding is True AND a step index was provided.
+            # Learnable alpha scales the contribution; init=1.0 keeps the base
+            # behavior while letting gradient descent rebalance the mix.
             if self.use_step_embedding and step_idx is not None:
                 step_emb = self.step_embedder(step_idx)  # [B, 32]
-                p = p + step_emb
+                p = p + self.step_embedding_alpha * step_emb
             p = p.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).repeat(1, 1, _d, _h, _w)
             ins = torch.cat([rgb_img, feat_img, p], dim=1) if self.ifSAM2  \
                 else torch.cat([feat_img, p], dim=1) # [B, 128, num_img, np, np]   96+32 or 48+48+32 = 128
