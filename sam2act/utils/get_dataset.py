@@ -151,10 +151,15 @@ def get_dataset(
     if only_train:
         test_dataset = None
     else:
+        # Val uses random sampling with task_uniform distribution so every
+        # task is represented proportionally. Enumerate mode walks tasks in
+        # insertion order and would under-sample any task beyond the first
+        # when val_iters * batch_size < first-task transition count.
         test_wrapped_replay = PyTorchReplayBuffer(
             test_replay_buffer,
-            sample_mode="enumerate",
+            sample_mode="random",
             num_workers=num_workers,
+            sample_distribution_mode="task_uniform",
         )
         test_dataset = test_wrapped_replay.dataset()
     return train_dataset, test_dataset
@@ -176,6 +181,8 @@ def get_dataset_temporal(
     num_maskmem,
     rank,
     sample_distribution_mode="transition_uniform",
+    val_from_train=False,
+    val_start_idx=0,
     demo_aug_every_n_per_task=None,
 ):
     # Resolve per-task augmentation from replay_buffer.yaml if not provided
@@ -258,12 +265,13 @@ def get_dataset_temporal(
         )
 
         if not only_train:
-            # print("----- Test Buffer -----")
+            val_data_path = data_path_train if val_from_train else data_path_val
+            val_sidx = val_start_idx if val_from_train else 0
             fill_replay_temporal(
                 replay=test_replay_buffer,
                 task=task,
                 task_replay_storage_folder=test_replay_storage_folder,
-                start_idx=0,
+                start_idx=val_sidx,
                 num_demos=NUM_VAL,
                 demo_augmentation=True,
                 demo_augmentation_every_n=demo_aug_every_n_per_task[task],
@@ -272,11 +280,12 @@ def get_dataset_temporal(
                 voxel_sizes=VOXEL_SIZES,
                 rotation_resolution=ROTATION_RESOLUTION,
                 crop_augmentation=False,
-                data_path=data_path_val,
+                data_path=val_data_path,
                 episode_folder=EPISODE_FOLDER,
                 variation_desriptions_pkl=VARIATION_DESCRIPTIONS_PKL,
                 clip_model=clip_model,
                 device=device,
+                rank=rank,
             )
 
     # delete the CLIP model since we have already extracted language features
@@ -296,10 +305,15 @@ def get_dataset_temporal(
     if only_train:
         test_dataset = None
     else:
+        # Val uses random sampling with task_uniform distribution so every
+        # task is represented proportionally. Enumerate mode walks tasks in
+        # insertion order and would under-sample any task beyond the first
+        # when val_iters * batch_size < first-task transition count.
         test_wrapped_replay = PyTorchReplayBuffer(
             test_replay_buffer,
-            sample_mode="enumerate",
+            sample_mode="random",
             num_workers=num_workers,
+            sample_distribution_mode="task_uniform",
         )
         test_dataset = test_wrapped_replay.dataset()
     return train_dataset, test_dataset

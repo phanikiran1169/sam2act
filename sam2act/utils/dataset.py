@@ -4,6 +4,7 @@
 
 # Adapted from: https://github.com/stepjam/ARM/blob/main/arm/c2farm/launch_utils.py
 import os
+import json
 import torch
 import pickle
 import logging
@@ -24,6 +25,97 @@ from rlbench.demo import Demo
 from sam2act.utils.peract_utils import LOW_DIM_SIZE, IMAGE_SIZE, CAMERAS
 from sam2act.libs.peract.helpers.demo_loading_utils import keypoint_discovery
 from sam2act.libs.peract.helpers.utils import extract_obs
+
+
+# ---------------------------------------------------------------------------
+# Replay cache metadata
+# ---------------------------------------------------------------------------
+# replay_meta.json tracks the parameters used to build an on-disk replay
+# buffer. Loaders compare the caller's requested parameters against the
+# cached manifest and refuse to load on mismatch, preventing silent
+# correctness bugs where a cached buffer is served with the wrong demo
+# range / augmentation settings.
+
+REPLAY_META_FILENAME = "replay_meta.json"
+REPLAY_META_VERSION = 1
+
+
+def _make_replay_meta(start_idx, num_demos, demo_augmentation,
+                      demo_augmentation_every_n, crop_augmentation):
+    if num_demos is None or start_idx is None:
+        raise ValueError(
+            f"_make_replay_meta requires concrete integers, "
+            f"got start_idx={start_idx!r}, num_demos={num_demos!r}"
+        )
+    return {
+        "version": REPLAY_META_VERSION,
+        "start_idx": int(start_idx),
+        "num_demos": int(num_demos),
+        "demo_augmentation": bool(demo_augmentation),
+        "demo_augmentation_every_n": int(demo_augmentation_every_n),
+        "crop_augmentation": bool(crop_augmentation),
+    }
+
+
+def _check_replay_meta(folder, requested_meta, task):
+    """
+    Verify that an on-disk replay buffer at `folder` matches `requested_meta`.
+
+    Behavior:
+    - No replay_meta.json: legacy cache, warn and allow (backward compat).
+    - Version mismatch: warn and allow (forward compat).
+    - Parameter mismatch: raise RuntimeError with clear instructions.
+    """
+    meta_path = os.path.join(folder, REPLAY_META_FILENAME)
+    if not os.path.exists(meta_path):
+        print(
+            f"[WARN] {task}: replay_meta.json missing at {folder}. "
+            f"Legacy cache — cannot verify demo range / augmentation match. "
+            f"Assuming cache is valid."
+        )
+        return
+    try:
+        with open(meta_path, "r") as f:
+            cached = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"[WARN] {task}: replay_meta.json unreadable ({e}). Treating as legacy cache.")
+        return
+    if cached.get("version") != REPLAY_META_VERSION:
+        print(
+            f"[WARN] {task}: replay_meta.json version "
+            f"{cached.get('version')} != {REPLAY_META_VERSION}. "
+            f"Skipping parameter check."
+        )
+        return
+    # Parameter fields that must match bit-for-bit.
+    keys = ("start_idx", "num_demos", "demo_augmentation",
+            "demo_augmentation_every_n", "crop_augmentation")
+    mismatches = [k for k in keys if cached.get(k) != requested_meta.get(k)]
+    if mismatches:
+        detail = "\n".join(
+            f"  {k}: cached={cached.get(k)!r}, requested={requested_meta.get(k)!r}"
+            for k in mismatches
+        )
+        raise RuntimeError(
+            f"Replay cache mismatch for task '{task}' at {folder}:\n"
+            f"{detail}\n"
+            f"The on-disk replay was built with different parameters than the "
+            f"current training run is requesting. Delete the cache and rebuild:\n"
+            f"  rm -rf {folder}\n"
+            f"Then re-run training (replay will be rebuilt from raw demos)."
+        )
+
+
+def _save_replay_meta(folder, meta):
+    # Atomic write: tmp file + rename so a crash leaves either the old file
+    # intact or the new one fully written — never a truncated JSON.
+    meta_path = os.path.join(folder, REPLAY_META_FILENAME)
+    tmp_path = meta_path + ".tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(meta, f, indent=2, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, meta_path)
 
 
 def create_replay(
@@ -475,15 +567,25 @@ def fill_replay(
     device="cpu",
 ):
 
+    requested_meta = _make_replay_meta(
+        start_idx=start_idx,
+        num_demos=num_demos,
+        demo_augmentation=demo_augmentation,
+        demo_augmentation_every_n=demo_augmentation_every_n,
+        crop_augmentation=crop_augmentation,
+    )
+
     disk_exist = False
     if replay._disk_saving:
-        if os.path.exists(task_replay_storage_folder):
+        replay_info_path = os.path.join(task_replay_storage_folder, "replay_info.npy")
+        if os.path.exists(task_replay_storage_folder) and os.path.exists(replay_info_path):
             print(
                 "[Info] Replay dataset already exists in the disk: {}".format(
                     task_replay_storage_folder
                 ),
                 flush=True,
             )
+            _check_replay_meta(task_replay_storage_folder, requested_meta, task)
             disk_exist = True
         else:
             logging.info("\t saving to disk: %s", task_replay_storage_folder)
@@ -557,6 +659,9 @@ def fill_replay(
                     + replay._task_add_count[task_idx].value
                 ],
             )
+
+        # save build parameters so future loads can detect mismatches
+        _save_replay_meta(task_replay_storage_folder, requested_meta)
 
         print("Replay filled with demos.")
 
@@ -696,9 +801,18 @@ def fill_replay_temporal(
     device="cpu",
 ):
 
+    requested_meta = _make_replay_meta(
+        start_idx=start_idx,
+        num_demos=num_demos,
+        demo_augmentation=demo_augmentation,
+        demo_augmentation_every_n=demo_augmentation_every_n,
+        crop_augmentation=crop_augmentation,
+    )
+
     disk_exist = False
     if replay._disk_saving:
-        if os.path.exists(task_replay_storage_folder):
+        replay_info_path = os.path.join(task_replay_storage_folder, "replay_info.npy")
+        if os.path.exists(task_replay_storage_folder) and os.path.exists(replay_info_path):
             if rank == 0:
                 print(
                     "[Info] Replay dataset already exists in the disk: {}".format(
@@ -706,6 +820,8 @@ def fill_replay_temporal(
                     ),
                     flush=True,
                 )
+            # Raises on parameter mismatch; warns on legacy cache.
+            _check_replay_meta(task_replay_storage_folder, requested_meta, task)
             disk_exist = True
         else:
             logging.info("\t saving to disk: %s", task_replay_storage_folder)
@@ -765,20 +881,26 @@ def fill_replay_temporal(
                     device=device,
                 )
 
-        # save TERMINAL info in replay_info.npy
-        task_idx = replay._task_index[task]
-        with open(
-            os.path.join(task_replay_storage_folder, "replay_info.npy"), "wb"
-        ) as fp:
-            np.save(
-                fp,
-                replay._store["terminal"][
-                    replay._task_replay_start_index[
-                        task_idx
-                    ] : replay._task_replay_start_index[task_idx]
-                    + replay._task_add_count[task_idx].value
-                ],
-            )
+        # Rank 0 writes the sentinel + metadata sidecar. Other ranks skip
+        # the writes so no concurrent file clobber happens under DDP.
+        if rank == 0:
+            # save TERMINAL info in replay_info.npy
+            task_idx = replay._task_index[task]
+            with open(
+                os.path.join(task_replay_storage_folder, "replay_info.npy"), "wb"
+            ) as fp:
+                np.save(
+                    fp,
+                    replay._store["terminal"][
+                        replay._task_replay_start_index[
+                            task_idx
+                        ] : replay._task_replay_start_index[task_idx]
+                        + replay._task_add_count[task_idx].value
+                    ],
+                )
+
+            # save build parameters so future loads can detect mismatches
+            _save_replay_meta(task_replay_storage_folder, requested_meta)
 
         print("Replay filled with demos.")
 

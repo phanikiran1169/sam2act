@@ -7,8 +7,12 @@ def wandb_init(args, mode, key, save_dir=None):
         wandb.login(key=key)
 
     run_name = os.environ.get("WANDB_NAME", args.exp_name)
+    project = os.environ.get("WANDB_PROJECT", args.exp_id)
+    entity = os.environ.get("WANDB_ENTITY", None)
+    print(f"[wandb] entity={entity or '(default)'}, project={project}, run={run_name}")
     wandb.init(
-        project=args.exp_id,
+        entity=entity,
+        project=project,
         name=run_name,
         config=args,
         save_code=False
