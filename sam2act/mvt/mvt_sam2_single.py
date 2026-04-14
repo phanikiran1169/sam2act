@@ -2,6 +2,7 @@
 #
 # Licensed under the NVIDIA Source Code License [see LICENSE for details].
 
+import math
 from math import ceil
 
 import torch
@@ -33,6 +34,53 @@ def initialize_weights(m):
             m.weight, nonlinearity="relu"
         )
         nn.init.zeros_(m.bias)
+
+
+class StepEmbedder(nn.Module):
+    """Sinusoidal step embedding + 2-layer MLP (MemoryVLA-style).
+
+    Turns an integer keypoint index into a learnable per-step feature vector.
+    Inspired by MemoryVLA's TimestepEmbedder: sinusoidal features are passed
+    through a small MLP so the model can shape the positional signal.
+
+    Used additively on top of the proprio feature in MVT_SAM2_Single when
+    `use_step_embedding` is enabled (Stage 0 only).
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int = 32,
+        frequency_embedding_size: int = 32,
+        max_period: int = 10000,
+    ):
+        super().__init__()
+        self.frequency_embedding_size = frequency_embedding_size
+        self.max_period = max_period
+        self.mlp = nn.Sequential(
+            nn.Linear(frequency_embedding_size, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+    @staticmethod
+    def sinusoidal(t: torch.Tensor, dim: int, max_period: int = 10000) -> torch.Tensor:
+        """Standard sinusoidal positional encoding. t: [B] numeric -> [B, dim]."""
+        half = dim // 2
+        freqs = torch.exp(
+            -math.log(max_period)
+            * torch.arange(half, device=t.device, dtype=torch.float32)
+            / half
+        )
+        args = t.float()[:, None] * freqs[None]
+        emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        if dim % 2:  # odd dim: pad with zeros
+            emb = torch.cat([emb, torch.zeros_like(emb[:, :1])], dim=-1)
+        return emb
+
+    def forward(self, step_idx: torch.Tensor) -> torch.Tensor:
+        # step_idx: [B] int64 (or any numeric), returns [B, hidden_dim]
+        sinu = self.sinusoidal(step_idx, self.frequency_embedding_size, self.max_period)
+        return self.mlp(sinu)
 
 
 class LayerNorm2d(nn.Module):
@@ -99,6 +147,9 @@ class MVT_SAM2_Single(nn.Module):
         sam2_ckpt,
         use_memory,
         num_maskmem,
+        use_step_embedding=False,
+        step_embedding_freq_size=32,
+        step_embedding_max_period=100,
         renderer_device="cuda:0",
         renderer=None,
         no_feat=False,
@@ -293,6 +344,20 @@ class MVT_SAM2_Single(nn.Module):
                 norm="group",
                 activation=activation,
             )
+
+        # Learnable step embedding (additive on top of proprio features).
+        # Only instantiated when explicitly enabled via config — baseline runs
+        # are bit-identical when the flag is off.
+        self.use_step_embedding = use_step_embedding
+        if self.add_proprio and self.use_step_embedding:
+            self.step_embedder = StepEmbedder(
+                hidden_dim=32,  # MUST match proprio_preprocess output dim
+                frequency_embedding_size=step_embedding_freq_size,
+                max_period=step_embedding_max_period,
+            )
+            # Learnable scalar to rebalance step and proprio contributions.
+            # Init=1.0 preserves p + step_emb; gradient descent adjusts.
+            self.step_embedding_alpha = nn.Parameter(torch.ones(1))
 
         self.patchify = Conv2DBlock(
             7 if self.ifsep else 10,
@@ -653,6 +718,7 @@ class MVT_SAM2_Single(nn.Module):
         lang_emb=None,
         wpt_local=None,
         rot_x_y=None,
+        step_idx=None,
         **kwargs,
     ):
         """
@@ -661,6 +727,9 @@ class MVT_SAM2_Single(nn.Module):
         :param lang_emb: tensor of shape (bs, lang_len, lang_dim)
         :param img_aug: (float) magnitude of augmentation in rgb image
         :param rot_x_y: (bs, 2)
+        :param step_idx: optional [B] int64 tensor of keypoint indices.
+            When `use_step_embedding` is True, gets embedded and added to proprio.
+            Ignored otherwise.
         """
 
         bs, num_img, img_feat_dim, h, w = img.shape
@@ -725,7 +794,14 @@ class MVT_SAM2_Single(nn.Module):
             ).transpose(1, 2).clone())   # torch.Size([bs, feat_img_dim :96 or 48, 5, 20, 20])
         _, _, _d, _h, _w = feat_img.shape
         if self.add_proprio:
-            p = self.proprio_preprocess(proprio)  # [B,4] -> [B,32]    
+            p = self.proprio_preprocess(proprio)  # [B,4] -> [B,32]
+            # Additive step embedding (positional-encoding style) — only active
+            # when use_step_embedding is True AND a step index was provided.
+            # Learnable alpha scales the contribution; init=1.0 keeps the base
+            # behavior while letting gradient descent rebalance the mix.
+            if self.use_step_embedding and step_idx is not None:
+                step_emb = self.step_embedder(step_idx)  # [B, 32]
+                p = p + self.step_embedding_alpha * step_emb
             p = p.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).repeat(1, 1, _d, _h, _w)
             ins = torch.cat([rgb_img, feat_img, p], dim=1) if self.ifSAM2  \
                 else torch.cat([feat_img, p], dim=1) # [B, 128, num_img, np, np]   96+32 or 48+48+32 = 128
