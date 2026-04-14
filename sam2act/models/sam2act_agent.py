@@ -1143,8 +1143,7 @@ class SAM2Act_Agent:
     ) -> ActResult:
         # Note: the `step` argument is bound to rollout_generator's
         # step_signal.value which is never incremented (stays at -1). We ignore
-        # it and use an agent-side counter (_current_step) instead. See
-        # plans/modular-coalescing-lampson.md for details.
+        # it and use an agent-side counter (_current_step) instead.
         if self.add_lang:
             lang_goal_tokens = observation.get("lang_goal_tokens", None).long()
             _, lang_goal_embs = _clip_encode_text(self.clip_model, lang_goal_tokens[0])

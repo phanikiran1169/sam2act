@@ -44,9 +44,7 @@ class StepEmbedder(nn.Module):
     through a small MLP so the model can shape the positional signal.
 
     Used additively on top of the proprio feature in MVT_SAM2_Single when
-    `use_step_embedding` is enabled (Stage 0 only). See
-    plans/modular-coalescing-lampson.md for rationale and the stack_and_swap
-    motivation.
+    `use_step_embedding` is enabled (Stage 0 only).
     """
 
     def __init__(
@@ -151,7 +149,7 @@ class MVT_SAM2_Single(nn.Module):
         num_maskmem,
         use_step_embedding=False,
         step_embedding_freq_size=32,
-        step_embedding_max_period=10000,
+        step_embedding_max_period=100,
         renderer_device="cuda:0",
         renderer=None,
         no_feat=False,
@@ -357,12 +355,8 @@ class MVT_SAM2_Single(nn.Module):
                 frequency_embedding_size=step_embedding_freq_size,
                 max_period=step_embedding_max_period,
             )
-            # Learnable scale so the model balances step vs proprio contribution.
-            # proprio_preprocess outputs with norm ~6 after GroupNorm+LReLU while
-            # the step embedder produces norm ~1 at init — without this the
-            # model would see a 7x smaller positional signal than gripper state.
-            # Starting alpha at 1.0 preserves the initial `p + step_emb` behavior
-            # so the model can scale up (emphasize phase) or down (ignore it).
+            # Learnable scalar to rebalance step and proprio contributions.
+            # Init=1.0 preserves p + step_emb; gradient descent adjusts.
             self.step_embedding_alpha = nn.Parameter(torch.ones(1))
 
         self.patchify = Conv2DBlock(

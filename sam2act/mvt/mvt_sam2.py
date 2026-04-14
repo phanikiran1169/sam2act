@@ -95,7 +95,7 @@ class MVT_SAM2(nn.Module):
         num_maskmem,
         use_step_embedding=False,
         step_embedding_freq_size=32,
-        step_embedding_max_period=10000,
+        step_embedding_max_period=100,
         renderer_device="cuda:0",
     ):
         """MultiView Transfomer
