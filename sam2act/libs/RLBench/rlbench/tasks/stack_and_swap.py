@@ -79,13 +79,17 @@ class StackedAtCenterCondition(Condition):
         tol = self._xy_tol
         zt = self._z_tol
 
-        # Check both stacking orders: A on B or B on A
-        for up, lp in [(bp, ap), (ap, bp)]:
-            at_center = (abs(up[0] - cx) <= tol and abs(up[1] - cy) <= tol)
-            on_lower = (abs(up[0] - lp[0]) <= tol and
-                        abs(up[1] - lp[1]) <= tol and
-                        abs((up[2] - lp[2]) - BLOCK_HEIGHT) <= zt)
-            if at_center and on_lower:
+        # Whichever block is at center is the lower block.
+        # The other block must be stacked on top of it.
+        for lower, upper in [(ap, bp), (bp, ap)]:
+            lower_at_center = (abs(lower[0] - cx) <= tol and
+                               abs(lower[1] - cy) <= tol)
+            if not lower_at_center:
+                continue
+            stacked = (abs(upper[0] - lower[0]) <= tol and
+                       abs(upper[1] - lower[1]) <= tol and
+                       abs((upper[2] - lower[2]) - BLOCK_HEIGHT) <= zt)
+            if stacked:
                 self._done = True
                 return self._done, False
 
