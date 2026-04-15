@@ -73,15 +73,22 @@ class StackedAtCenterCondition(Condition):
         self._done = False
 
     def condition_met(self):
-        lp = self._lower.get_position()
-        up = self._upper.get_position()
-        at_center = (abs(up[0] - self._center_xy[0]) <= self._xy_tol and
-                     abs(up[1] - self._center_xy[1]) <= self._xy_tol)
-        on_lower = (abs(up[0] - lp[0]) <= self._xy_tol and
-                    abs(up[1] - lp[1]) <= self._xy_tol and
-                    abs((up[2] - lp[2]) - BLOCK_HEIGHT) <= self._z_tol)
-        if at_center and on_lower:
-            self._done = True
+        ap = self._lower.get_position()
+        bp = self._upper.get_position()
+        cx, cy = self._center_xy
+        tol = self._xy_tol
+        zt = self._z_tol
+
+        # Check both stacking orders: A on B or B on A
+        for up, lp in [(bp, ap), (ap, bp)]:
+            at_center = (abs(up[0] - cx) <= tol and abs(up[1] - cy) <= tol)
+            on_lower = (abs(up[0] - lp[0]) <= tol and
+                        abs(up[1] - lp[1]) <= tol and
+                        abs((up[2] - lp[2]) - BLOCK_HEIGHT) <= zt)
+            if at_center and on_lower:
+                self._done = True
+                return self._done, False
+
         return self._done, False
 
 

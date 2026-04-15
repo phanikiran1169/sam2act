@@ -343,6 +343,23 @@ def eval(
             reward = episode_rollout[-1].reward
             task_rewards.append(reward)
             lang_goal = eval_env._lang_goal
+
+            # Log per-condition debug info at episode end
+            if reward < 100.0:
+                try:
+                    task_obj = eval_env._task._task
+                    conds = getattr(task_obj, 'goal_conditions', None) or getattr(task_obj, '_success_conditions', [])
+                    cond_status = []
+                    for ci, cond in enumerate(conds):
+                        met, _ = cond.condition_met()
+                        cond_status.append(f"  C{ci} ({type(cond).__name__}): {'PASS' if met else 'FAIL'}")
+                    if cond_status:
+                        print(f"  [DEBUG] Episode {ep} conditions:\n" + "\n".join(cond_status))
+                    else:
+                        print(f"  [DEBUG] Episode {ep}: no conditions found on {type(task_obj)}")
+                except Exception as e:
+                    print(f"  [DEBUG] Episode {ep}: condition logging failed: {e}")
+
             if verbose:
                 print(
                     f"Evaluating {task_name} | Episode {ep} | Score: {reward} | Episode Length: {len(episode_rollout)} | Lang Goal: {lang_goal}"
