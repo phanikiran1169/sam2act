@@ -7,5 +7,5 @@ default: 10
 # Per-task overrides. Keys must match task names exactly.
 # Higher N = fewer transitions per demo = each transition seen more often per epoch.
 tasks:
-  # stack_and_swap: 24 waypoints, 400 demos. N=50 targets ~2-3x seen/epoch repetition.
-  stack_and_swap: 50
+  # stack_and_swap: 24 waypoints, 100 demos. N=20 balances data volume and quality.
+  stack_and_swap: 20
