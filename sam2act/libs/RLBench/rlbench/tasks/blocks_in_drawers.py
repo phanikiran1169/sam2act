@@ -13,9 +13,20 @@ from pyrep.objects.shape import Shape
 from pyrep.objects.proximity_sensor import ProximitySensor
 from rlbench.backend.task import Task
 from rlbench.backend.conditions import (
-    ConditionSet, DetectedCondition, NothingGrasped
+    Condition, ConditionSet, DetectedCondition, NothingGrasped
 )
 from rlbench.backend.spawn_boundary import SpawnBoundary
+
+
+class DrawerClosedCondition(Condition):
+    """Succeeds when the drawer joint position is below `threshold` (m)."""
+    def __init__(self, joint: Joint, threshold: float = 0.03):
+        self._joint = joint
+        self._threshold = threshold
+
+    def condition_met(self):
+        met = abs(self._joint.get_joint_position()) < self._threshold
+        return met, False
 
 DRAWER_NAMES = ['bottom', 'middle', 'top']
 VARIATIONS = list(permutations(DRAWER_NAMES, 2))  # 6 ordered pairs
@@ -262,21 +273,22 @@ class BlocksInDrawers(Task):
             print(f'  wp{idx:2d}: pos=[{pos[0]:.3f}, {pos[1]:.3f}, '
                   f'{pos[2]:.3f}] ori={[round(o,3) for o in ori]}')
 
-        # Success: both blocks detected inside their target drawers, and
-        # nothing left grasped at the end.
+        # Success: both blocks detected inside their target drawers,
+        # both target drawers closed at the end, and nothing grasped.
         self.goal_conditions = [
             DetectedCondition(self._block1, self._drawer_sensors[d1]),
             DetectedCondition(self._block2, self._drawer_sensors[d2]),
+            DrawerClosedCondition(self._drawer_joints[d1]),
+            DrawerClosedCondition(self._drawer_joints[d2]),
             NothingGrasped(self.robot.gripper),
         ]
         self.register_success_conditions(
             [ConditionSet(self.goal_conditions, order_matters=False)])
 
         return [
-            f'put the red block in the {d1} drawer and the blue block in '
-            f'the {d2} drawer',
-            'place each block into its assigned drawer',
-            'store the blocks in the drawers',
+            'put each block in a different drawer and close the drawers',
+            'store the two blocks in two separate drawers',
+            'place the blocks in different drawers and close each one',
         ]
 
     def _drawer_phase_specs(self, drawer_name, block, base_idx):
