@@ -71,18 +71,18 @@ BLOCK_MASS = 0.05
 
 # DEBUG MODE: how many phases to enable. Each phase adds one waypoint
 # beyond the previous cumulative end index, so we can isolate failures.
-# 1  = Phase 1: open drawer 1 (wp0-wp5)          =>  6 waypoints
-# 2  = + wp6:  in-place rotation to face table   =>  7 waypoints
-# 3  = + wp7:  vertical lift off from wp6        =>  8 waypoints
-# 4  = + wp8:  lateral transit above block       =>  9 waypoints
-# 5  = + wp9:  descend above block (approach Z)  => 10 waypoints
-# 6  = + wp10: grasp block                        => 11 waypoints
-# 7  = + wp11: lift block to transit Z            => 12 waypoints
-# 8  = + wp12: transit above drawer interior      => 13 waypoints
-# 9  = + wp13: descend above placement            => 14 waypoints
-# 10 = + wp14: place inside drawer                => 15 waypoints
-# 11 = + wp15: retreat up                         => 16 waypoints
-DEBUG_PHASE = 3
+# 1  = Phase 1: open drawer 1 (wp0-wp5)              =>  6 waypoints
+# 2  = + wp6:  extra retract in -X (clear airspace)  =>  7 waypoints
+# 3  = + wp7:  vertical lift to transit Z             =>  8 waypoints
+# 4  = + wp8:  transit to above block + reorient ABOVE=>  9 waypoints
+# 5  = + wp9:  descend above block (approach Z)       => 10 waypoints
+# 6  = + wp10: grasp block                            => 11 waypoints
+# 7  = + wp11: lift block to transit Z                => 12 waypoints
+# 8  = + wp12: transit above drawer interior          => 13 waypoints
+# 9  = + wp13: descend above placement                => 14 waypoints
+# 10 = + wp14: place inside drawer                    => 15 waypoints
+# 11 = + wp15: retreat up                             => 16 waypoints
+DEBUG_PHASE = 11
 
 # Drawer prismatic joint range is [0.0, 0.3] (verified via inspect_scene.py).
 # Use 0.2 as the open target (67% of full travel) — leaves headroom and
@@ -105,7 +105,7 @@ HANDLE_APPROACH_DX = 0.0
 # High transit Z: above the drawer frame top (~1.218) by a safe margin.
 # Used for initial descent from rest and any lateral transitions so the
 # arm stays well clear of the drawer top surface during horizontal moves.
-Z_TRANSIT = 1.30
+Z_TRANSIT = 1.35
 
 
 class DrawerClosedCondition(Condition):
@@ -151,34 +151,27 @@ class RelWaypoint:
 # Subsequent phases will be added once Phase 1 is verified.
 PHASE_RANGES = [
     # Phase 1: open drawer 1 (6 waypoints, relative to drawer anchor).
-    #   wp0: intermediate transit (mid Z, 45-deg tilted gripper)
-    #   wp1: at handle height at approach X, gripper toward drawer
-    #   wp2: forward slide in +X to closed handle
-    #   wp3: grip (callback)
-    #   wp4: linear pull in -X (drawer opens), release (callback)
-    #   wp5: retract horizontally in -X to approach X (same Z, orientation)
     (0, 6),
-    # Phase 2: pick block A, place in open drawer 1. Each step adds one
-    # waypoint beyond the previous cumulative end index.
-    #   wp6:  in-place rotation — gripper from handle_ori to ABOVE
+    # Phase 2: pick block A, place in open drawer 1.
+    #   wp6:  extra retract in -X to safe X
     (6, 7),
-    #   wp7:  lift up from wp6 position to transit Z (pure vertical)
+    #   wp7:  vertical lift to transit Z at safe X
     (7, 8),
-    #   wp8:  lateral transit above block at transit Z
+    #   wp8:  transit above block + reorient to ABOVE (combined)
     (8, 9),
     #   wp9:  descend above block (approach Z)
     (9, 10),
-    #   wp10: descend to grasp (callback closes gripper on block)
+    #   wp10: grasp block (callback)
     (10, 11),
-    #   wp11: lift to transit Z (clears drawer frame top)
+    #   wp11: lift to transit Z (block in hand)
     (11, 12),
-    #   wp12: lateral transit above drawer interior
+    #   wp12: transit above drawer interior
     (12, 13),
-    #   wp13: descend to just above interior placement
+    #   wp13: descend above placement
     (13, 14),
-    #   wp14: place inside drawer (callback releases block)
+    #   wp14: place inside drawer (callback)
     (14, 15),
-    #   wp15: retreat up out of drawer
+    #   wp15: retreat up
     (15, 16),
 ]
 
@@ -193,6 +186,13 @@ GRIPPER_TILT45 = [0.0, math.pi / 4, math.pi / 2]
 # small margin — keeps the tilted-gripper waypoint inside the comfortable
 # arm reach envelope.
 Z_TILT = 1.25
+
+# Extra retract X (Phase 2 wp7). After the drawer-close retract leaves
+# the gripper at approach X (~0.13), we pull back further along -X to a
+# position clear of the drawer's open footprint. From here a vertical
+# lift gives the wrist plenty of room to rotate without flipping. Tuned
+# to sit just in front of the robot base (X_base ~ -0.31).
+X_SAFE_RETRACT = 0.13
 
 
 class BlocksInDrawers(Task):
@@ -234,7 +234,12 @@ class BlocksInDrawers(Task):
             name: Dummy(f'waypoint_anchor_{name}') for name in DRAWER_NAMES
         }
 
-        self.register_graspable_objects([self._block_a, self._block_b])
+        self._drawer_shapes = {
+            name: Shape(f'drawer_{name}') for name in DRAWER_NAMES
+        }
+        self.register_graspable_objects(
+            [self._block_a, self._block_b]
+            + list(self._drawer_shapes.values()))
 
         # Delete legacy waypoints from .ttm (may be non-contiguous).
         for i in range(100):
@@ -256,9 +261,9 @@ class BlocksInDrawers(Task):
         # Phase 1 (wp0-wp5, drawer open):
         #   wp3:  close gripper to grip handle
         #   wp4:  linear pull to open, then release
-        # Phase 2 (wp6-wp15, pick block, place in drawer):
-        #   wp10: close gripper on block (grasp)
-        #   wp14: open gripper (release block in drawer)
+        # Phase 2 (wp6-wp16, pick block, place in drawer):
+        #   wp11: close gripper on block (grasp)
+        #   wp15: open gripper (release block in drawer)
         callbacks = {
             3: self._close_grip,                        # grip handle
             4: self._open,                              # release after pull
@@ -274,7 +279,7 @@ class BlocksInDrawers(Task):
         # prismatic joint axis.
         for idx in range(self._n_waypoints):
             self.register_waypoint_ability_start(idx, self._skip_collisions)
-        linear_indices = [4]   # drawer pull
+        linear_indices = [4]   # drawer pull only
         for idx in linear_indices:
             if idx < self._n_waypoints:
                 self.register_waypoint_ability_start(idx, self._set_linear)
@@ -299,6 +304,10 @@ class BlocksInDrawers(Task):
         while not done:
             done = gripper.actuate(0.0, velocity=0.04)
             self.pyrep.step()
+        # Physics-attach the active drawer shape so the linear pull
+        # reliably drags the drawer joint from closed to open.
+        if getattr(self, '_active_drawer_shape', None) is not None:
+            gripper.grasp(self._active_drawer_shape)
 
     def _open(self, _waypoint):
         gripper = self.robot.gripper
@@ -332,6 +341,7 @@ class BlocksInDrawers(Task):
 
     def init_episode(self, index: int) -> List[str]:
         d1, d2 = VARIATIONS[index]
+        self._active_drawer_shape = self._drawer_shapes[d1]
 
         for name in DRAWER_NAMES:
             self._drawer_joints[name].set_joint_position(
@@ -398,16 +408,20 @@ class BlocksInDrawers(Task):
                 'anchor')),
 
             # -- Phase 2: pick block A, place inside drawer 1 --
-            # wp6: in-place rotation at wp5 position, gripper now points
-            #      at the table (ABOVE). No translation.
+            # wp6: extra retract in -X to safe X (keep handle orientation).
+            #      Pure horizontal translation — no rotation.
             (6, RelWaypoint(anchor_d1,
-                [DRAWER_TRAVEL - HANDLE_APPROACH_DX, 0.0, 0.0],
-                GRIPPER_ABOVE)),
-            # wp7: vertical lift-off from wp6 position to transit Z
+                [X_SAFE_RETRACT - anchor_d1.get_position()[0], 0.0, 0.0],
+                'anchor')),
+            # wp7: pure vertical lift to transit Z, keep handle orientation.
+            #      Short single-dominant-joint motion — clean curve up.
             (7, RelWaypoint(anchor_d1,
-                [DRAWER_TRAVEL - HANDLE_APPROACH_DX, 0.0, z_tilt_offset],
-                GRIPPER_ABOVE)),
-            # wp8: lateral transit above block at transit Z (clears drawer top)
+                [X_SAFE_RETRACT - anchor_d1.get_position()[0], 0.0,
+                 z_tilt_offset],
+                'anchor')),
+            # wp8: lateral transit above block AND reorient to ABOVE in one
+            #      planned motion. Starts with handle orientation at safe-X,
+            #      ends pointing down over the block at transit Z.
             (8, RelWaypoint(block_a,
                 [0.0, 0.0, z_transit_from_block],
                 GRIPPER_ABOVE)),
@@ -425,10 +439,12 @@ class BlocksInDrawers(Task):
             # the drawer has been pulled open. At validate time the drawer is
             # still closed, so we read the sensor's current (closed) X and
             # add DRAWER_TRAVEL to get where the sensor will be when open.
-            # Y and Z are unaffected by the prismatic pull.
-            # wp12: lateral transit above the (soon-to-be-open) interior
+            # wp12: lateral transit above the (soon-to-be-open) interior.
+            #      Use a lower Z than the block transit (sensor_z + 0.3) to
+            #      keep the pose inside the Panda's reach envelope — gripper
+            #      pointing down at X~0.4 is near the reach limit at Z=1.35.
             (12, RelWaypoint(sensor_d1,
-                [DRAWER_TRAVEL, 0.0, z_transit_from_sensor],
+                [DRAWER_TRAVEL, 0.0, 0.30],
                 GRIPPER_ABOVE)),
             # wp13: descend to just above interior placement
             (13, RelWaypoint(sensor_d1,
@@ -438,9 +454,9 @@ class BlocksInDrawers(Task):
             (14, RelWaypoint(sensor_d1,
                 [DRAWER_TRAVEL, 0.0, 0.0],
                 GRIPPER_ABOVE)),
-            # wp15: retreat up out of drawer cavity
+            # wp15: retreat up out of drawer cavity (same lowered Z as wp12)
             (15, RelWaypoint(sensor_d1,
-                [DRAWER_TRAVEL, 0.0, z_transit_from_sensor],
+                [DRAWER_TRAVEL, 0.0, 0.30],
                 GRIPPER_ABOVE)),
         ]
 
