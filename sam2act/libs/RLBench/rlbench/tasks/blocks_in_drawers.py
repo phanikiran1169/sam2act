@@ -1,9 +1,10 @@
 # blocks_in_drawers.py: MemoryBench task -- uses reopen_drawer scene layout.
 # blocks_in_drawers.py: Open one closed drawer, pick one block, place inside.
 
-import math
 from itertools import permutations
 from typing import List
+
+import numpy as np
 
 from pyrep.const import PrimitiveShape
 from pyrep.objects.dummy import Dummy
@@ -15,7 +16,6 @@ from rlbench.backend.task import Task
 from rlbench.backend.conditions import (
     Condition, ConditionSet, DetectedCondition, NothingGrasped
 )
-from rlbench.backend.spawn_boundary import SpawnBoundary
 
 
 class DrawerClosedCondition(Condition):
@@ -44,25 +44,30 @@ GRIPPER_ABOVE = [-3.1416, 0.0, 1.5708]
 DRAWER_TRAVEL = -0.21            # closed -> open, in -Y
 HANDLE_APPROACH_DY = -0.042      # pre-approach offset from closed handle
 
-# Block spawn (fixed for now, inside the 'boundary' shape at y=-0.316).
+# Block properties. Blocks are identical red cubes; spawn positions are
+# sampled per-episode from zones derived from the `boundary` shape.
 BLOCK_SIZE = [0.04, 0.04, 0.04]
 BLOCK_HALF = BLOCK_SIZE[2] / 2
-BLOCK_COLOR = [1.0, 0.0, 0.0]    # both blocks are red (identical targets)
+BLOCK_COLOR = [1.0, 0.0, 0.0]
 BLOCK_MASS = 0.05
 Z_TABLE = 0.752
 Z_BLOCK_GRASP = Z_TABLE + BLOCK_HALF
 Z_BLOCK_APPROACH = Z_BLOCK_GRASP + 0.15
 
-# Two blocks on the table inside the spawn boundary. Boundary spans
-# X~[0.03, 0.48], Y~[-0.44, -0.19]. Pick well-separated fixed points.
+# Fallback spawn positions used at shape creation time; overwritten by the
+# zone sampler in init_episode.
 BLOCK1_XY = (0.15, -0.35)
 BLOCK2_XY = (0.30, -0.35)
 
 # Transit height when moving laterally with the block.
-Z_TRANSIT = 1.20
+Z_TRANSIT = 1.28
 
 # Placement inside the drawer cavity: above the success sensor.
 Z_INTERIOR_CLEARANCE = 0.10
+
+# Per-block spawn margin (see blocks_in_drawers_hard.py). Each block center
+# stays at least (block_half + BLOCK_SPAWN_MARGIN) from its spawn-zone edge.
+BLOCK_SPAWN_MARGIN = 0.02
 
 
 
@@ -127,7 +132,26 @@ class BlocksInDrawers(Task):
             [self._block1, self._block2]
             + list(self._drawer_shapes.values()))
 
-        self._spawn_boundary = SpawnBoundary([Shape('boundary')])
+        # Compute spawn zones from the `boundary` shape: X axis split into 2
+        # equal strips, one per block; Y spans the full boundary. A margin of
+        # (block_half + BLOCK_SPAWN_MARGIN) per zone edge keeps blocks clear.
+        boundary = Shape('boundary')
+        bpos = boundary.get_position()
+        bbox = boundary.get_bounding_box()
+        x_min = bpos[0] + bbox[0]
+        x_max = bpos[0] + bbox[1]
+        y_min = bpos[1] + bbox[2]
+        y_max = bpos[1] + bbox[3]
+        pad = BLOCK_HALF + BLOCK_SPAWN_MARGIN
+        n = 2
+        step = (x_max - x_min) / n
+        self._spawn_zones = [
+            (x_min + i * step + pad,
+             x_min + (i + 1) * step - pad,
+             y_min + pad,
+             y_max - pad)
+            for i in range(n)
+        ]
 
         # Delete any legacy waypoints left in the scene.
         for i in range(100):
@@ -200,18 +224,27 @@ class BlocksInDrawers(Task):
         return _fn
 
     def _close_grip_drawer1(self, _waypoint):
-        self._close_grip_drawer_shape(self._drawer_shapes[self._d1])
+        self._close_grip_drawer_by_name(self._d1)
 
     def _close_grip_drawer2(self, _waypoint):
-        self._close_grip_drawer_shape(self._drawer_shapes[self._d2])
+        self._close_grip_drawer_by_name(self._d2)
 
-    def _close_grip_drawer_shape(self, drawer_shape):
+    def _close_grip_drawer_by_name(self, drawer_name):
         gripper = self.robot.gripper
         done = False
         while not done:
             done = gripper.actuate(0.0, velocity=0.04)
             self.pyrep.step()
-        gripper.grasp(drawer_shape)
+        gripper.grasp(self._drawer_shapes[drawer_name])
+        # Pin every non-active drawer's joint by shrinking its range to zero
+        # at its current position. Prevents contact drag from the active
+        # drawer. The active drawer keeps its full range of motion.
+        self._active_drawer_name = drawer_name
+        for name, j in self._drawer_joints.items():
+            if name == drawer_name:
+                continue
+            pos = j.get_joint_position()
+            j.set_joint_interval(False, [pos, 0.0])
 
     def _open(self, _waypoint):
         gripper = self.robot.gripper
@@ -220,6 +253,11 @@ class BlocksInDrawers(Task):
         while not done:
             done = gripper.actuate(1.0, velocity=0.04)
             self.pyrep.step()
+        # Restore the full [0, 0.21] range on every drawer so the next grip
+        # callback can freely open or close any of them.
+        for j in self._drawer_joints.values():
+            j.set_joint_interval(False, [0.0, 0.21])
+        self._active_drawer_name = None
 
     def _skip_collisions(self, waypoint):
         waypoint._ignore_collisions = True
@@ -238,26 +276,25 @@ class BlocksInDrawers(Task):
     def init_episode(self, index: int) -> List[str]:
         d1, d2 = VARIATIONS[index]
         self._d1, self._d2 = d1, d2
+        self._active_drawer_name = None
 
-        # Reset every drawer to closed.
+        # Reset every drawer to closed with its full [0, 0.21] range. Ranges
+        # shrink to zero on inactive drawers during each grip callback and
+        # are restored on release.
         for name in DRAWER_NAMES:
-            self._drawer_joints[name].set_joint_position(
-                0.0, disable_dynamics=True)
+            j = self._drawer_joints[name]
+            j.set_joint_interval(False, [0.0, 0.21])
+            j.set_joint_position(0.0, disable_dynamics=True)
 
-        # Randomize block positions inside the 'boundary' shape. Fix Z and
-        # yaw (cubes): no rotation randomization. min_distance keeps the
-        # two blocks apart so the gripper can reach each one cleanly.
-        self._block1.set_position(
-            [BLOCK1_XY[0], BLOCK1_XY[1], Z_BLOCK_GRASP])
-        self._block2.set_position(
-            [BLOCK2_XY[0], BLOCK2_XY[1], Z_BLOCK_GRASP])
-        self._spawn_boundary.clear()
-        for block in (self._block1, self._block2):
-            self._spawn_boundary.sample(
-                block,
-                min_rotation=(0.0, 0.0, 0.0),
-                max_rotation=(0.0, 0.0, 0.0),
-                min_distance=0.12)
+        # Randomize block positions within fixed spawn zones. Each block is
+        # assigned to its own X-strip; block-to-strip assignment is shuffled.
+        zones = list(self._spawn_zones)
+        np.random.shuffle(zones)
+        for block, zone in zip((self._block1, self._block2), zones):
+            x_lo, x_hi, y_lo, y_hi = zone
+            x = np.random.uniform(x_lo, x_hi)
+            y = np.random.uniform(y_lo, y_hi)
+            block.set_position([x, y, Z_BLOCK_GRASP])
 
         rel_specs = (
             self._drawer_phase_specs(d1, self._block1, base_idx=0)
