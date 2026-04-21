@@ -64,6 +64,15 @@ _C.use_step_embedding = False
 _C.step_embedding_freq_size = 32
 _C.step_embedding_max_period = 100
 
+# Phase-keyed memory retrieval (Stage 2). Injects the step-embedding signal
+# into the memory attention's positional-encoding channel (K and Q sides)
+# so retrieval scores by phase proximity in addition to visual similarity.
+# No-op when use_phase_keyed_memory is False.
+_C.use_phase_keyed_memory = False
+_C.phase_key_injection = "both"       # one of: "both" | "write" | "read"
+_C.phase_key_alpha = 1.0              # float scalar; initial value when learnable
+_C.phase_key_alpha_learnable = False  # when True, alpha becomes an nn.Parameter
+
 def get_cfg_defaults():
     """Get a yacs CfgNode object with default values for my_project."""
     return _C.clone()

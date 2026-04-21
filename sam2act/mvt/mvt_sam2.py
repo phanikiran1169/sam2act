@@ -96,6 +96,10 @@ class MVT_SAM2(nn.Module):
         use_step_embedding=False,
         step_embedding_freq_size=32,
         step_embedding_max_period=100,
+        use_phase_keyed_memory=False,
+        phase_key_injection="both",
+        phase_key_alpha=1.0,
+        phase_key_alpha_learnable=False,
         renderer_device="cuda:0",
     ):
         """MultiView Transfomer
@@ -139,6 +143,9 @@ class MVT_SAM2(nn.Module):
         self.st_wpt_loc_aug = st_wpt_loc_aug
         self.st_wpt_loc_inp_no_noise = st_wpt_loc_inp_no_noise
         self.img_aug_2 = img_aug_2
+        # Needed by the freeze filter below (see use_memory branches) to keep
+        # phase-keying parameters trainable under Stage 2 memory training.
+        self.use_phase_keyed_memory = use_phase_keyed_memory
 
         # for verifying the input
         self.feat_ver = feat_ver
@@ -215,7 +222,22 @@ class MVT_SAM2(nn.Module):
 
             if self.use_memory:
                 for name, param in self.mvt1.named_parameters():
-                    if "sam" not in name and "up0" not in name:
+                    # Phase-keyed memory params must stay trainable under
+                    # Stage 2 memory training or the feature silently learns
+                    # nothing; see mvt_sam2_single.py phase-keyed block.
+                    trainable = (
+                        "sam" in name
+                        or "up0" in name
+                        or (
+                            self.use_phase_keyed_memory
+                            and (
+                                "phase_to" in name
+                                or "phase_key" in name
+                                or "step_embedder" in name
+                            )
+                        )
+                    )
+                    if not trainable:
                         param.requires_grad = False
 
         if self.stage_two:
@@ -225,10 +247,26 @@ class MVT_SAM2(nn.Module):
                     renderer=self.renderer,
                     sam2=self.sam2,
                 )
-                
+
                 if self.use_memory:
+                    # mvt2 is skipped at train time under use_memory=True so
+                    # its phase-keying params receive no gradient during
+                    # training. They are still kept trainable here so their
+                    # requires_grad flags stay consistent with mvt1 in case a
+                    # future path activates mvt2 under memory.
                     for name, param in self.mvt2.named_parameters():
-                        if "sam" not in name:
+                        trainable = (
+                            "sam" in name
+                            or (
+                                self.use_phase_keyed_memory
+                                and (
+                                    "phase_to" in name
+                                    or "phase_key" in name
+                                    or "step_embedder" in name
+                                )
+                            )
+                        )
+                        if not trainable:
                             param.requires_grad = False
 
     def get_pt_loc_on_img(self, pt, mvt1_or_mvt2, dyn_cam_info, out=None):
