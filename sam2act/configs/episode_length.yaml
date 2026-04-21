@@ -1,0 +1,14 @@
+# episode_length.yaml: Per-task maximum keypoint count.
+# episode_length.yaml: Used to normalize the `time` scalar in low_dim_state (extract_obs).
+# episode_length.yaml: time = (1 - t/(episode_length-1))*2 - 1 — hardcoded 25 in legacy code.
+
+# Default used for any task not listed in `tasks` below. 25 matches the legacy hardcode.
+default: 25
+
+# Per-task overrides. Keys must match task names exactly.
+# Set >= actual max keypoint count for the task's demos to keep time in [-1, +1].
+tasks:
+  # blocks_in_drawers: 30 waypoints in task, observed max 31 keypoints/demo. 35 adds margin.
+  blocks_in_drawers: 35
+  # blocks_in_drawers_hard: 45 waypoints in task (3-block, 3-drawer). 50 adds margin.
+  blocks_in_drawers_hard: 50

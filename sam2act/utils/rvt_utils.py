@@ -205,8 +205,12 @@ def get_eval_parser():
     parser.add_argument(
         "--episode-length",
         type=int,
-        default=25,
-        help="maximum control steps allowed for each episode",
+        default=None,
+        help=(
+            "maximum control steps allowed for each episode. "
+            "If omitted, resolved from configs/episode_length.yaml "
+            "(max over --tasks, falls back to default: 25)."
+        ),
     )
     parser.add_argument("--headless", action="store_true", default=False)
     parser.add_argument("--ground-truth", action="store_true", default=False)

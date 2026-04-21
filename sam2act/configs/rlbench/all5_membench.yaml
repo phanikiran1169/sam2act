@@ -1,0 +1,29 @@
+# all5_membench.yaml: Stage 0 config for 5 MemoryBench tasks only (no RLBench tasks).
+# all5_membench.yaml: Tests whether dropping RLBench eliminates multi-task interference seen in #43.
+
+# Tasks (5 MemoryBench)
+tasks: put_block_back,reopen_drawer,rearrange_block,stack_and_swap,blocks_in_drawers
+exp_name: 5mem
+
+# Training hyperparameters
+bs: 32                   # per-GPU batch size (total BS = 64 with 2 GPUs)
+epochs: 90
+base_lr: 1.25e-5         # effective LR = 8e-4
+steps_per_epoch: 625
+warmup_steps: 2000
+
+# Model config
+use_memory: false
+num_maskmem: 9
+
+# Data
+demo: 100
+sample_distribution_mode: task_uniform
+
+# Scripts
+train_script: train.py
+exp_cfg: configs/sam2act.yaml
+mvt_cfg: mvt/configs/sam2act_step_emb.yaml
+
+# Seed
+seed: 42

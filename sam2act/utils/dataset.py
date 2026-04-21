@@ -25,6 +25,7 @@ from rlbench.demo import Demo
 from sam2act.utils.peract_utils import LOW_DIM_SIZE, IMAGE_SIZE, CAMERAS
 from sam2act.libs.peract.helpers.demo_loading_utils import keypoint_discovery
 from sam2act.libs.peract.helpers.utils import extract_obs
+from sam2act.utils.episode_length_config import get_episode_length
 
 
 # ---------------------------------------------------------------------------
@@ -39,9 +40,14 @@ from sam2act.libs.peract.helpers.utils import extract_obs
 REPLAY_META_FILENAME = "replay_meta.json"
 REPLAY_META_VERSION = 1
 
+# Episode-length value assumed for legacy replays that pre-date the `episode_length`
+# meta field. Matches the hardcoded value in the old fill code.
+LEGACY_EPISODE_LENGTH = 25
+
 
 def _make_replay_meta(start_idx, num_demos, demo_augmentation,
-                      demo_augmentation_every_n, crop_augmentation):
+                      demo_augmentation_every_n, crop_augmentation,
+                      *, episode_length):
     if num_demos is None or start_idx is None:
         raise ValueError(
             f"_make_replay_meta requires concrete integers, "
@@ -54,6 +60,7 @@ def _make_replay_meta(start_idx, num_demos, demo_augmentation,
         "demo_augmentation": bool(demo_augmentation),
         "demo_augmentation_every_n": int(demo_augmentation_every_n),
         "crop_augmentation": bool(crop_augmentation),
+        "episode_length": int(episode_length),
     }
 
 
@@ -89,7 +96,12 @@ def _check_replay_meta(folder, requested_meta, task):
         return
     # Parameter fields that must match bit-for-bit.
     keys = ("start_idx", "num_demos", "demo_augmentation",
-            "demo_augmentation_every_n", "crop_augmentation")
+            "demo_augmentation_every_n", "crop_augmentation",
+            "episode_length")
+    # Legacy replays built before episode_length was tracked implicitly used
+    # the hardcoded value. Treat missing field as LEGACY_EPISODE_LENGTH.
+    cached_episode_length = cached.get("episode_length", LEGACY_EPISODE_LENGTH)
+    cached = {**cached, "episode_length": cached_episode_length}
     mismatches = [k for k in keys if cached.get(k) != requested_meta.get(k)]
     if mismatches:
         detail = "\n".join(
@@ -455,6 +467,7 @@ def _add_keypoints_to_replay(
     description: str = "",
     clip_model=None,
     device="cpu",
+    episode_length: int = 25,
 ):
     prev_action = None
     obs = inital_obs
@@ -487,7 +500,7 @@ def _add_keypoints_to_replay(
             CAMERAS,
             t=k - next_keypoint_idx,     # t for calculate time, represent t_th keypoint
             prev_action=prev_action,
-            episode_length=25,
+            episode_length=episode_length,
         )
         tokens = clip.tokenize([description]).numpy()
         token_tensor = torch.from_numpy(tokens).to(device)
@@ -538,7 +551,7 @@ def _add_keypoints_to_replay(
         CAMERAS,
         t=k + 1 - next_keypoint_idx,
         prev_action=prev_action,
-        episode_length=25,
+        episode_length=episode_length,
     )
     obs_dict_tp1["lang_goal_embs"] = lang_embs[0].float().detach().cpu().numpy()
 
@@ -567,12 +580,14 @@ def fill_replay(
     device="cpu",
 ):
 
+    task_episode_length = get_episode_length(task)
     requested_meta = _make_replay_meta(
         start_idx=start_idx,
         num_demos=num_demos,
         demo_augmentation=demo_augmentation,
         demo_augmentation_every_n=demo_augmentation_every_n,
         crop_augmentation=crop_augmentation,
+        episode_length=task_episode_length,
     )
 
     disk_exist = False
@@ -643,6 +658,7 @@ def fill_replay(
                     description=desc,
                     clip_model=clip_model,
                     device=device,
+                    episode_length=task_episode_length,
                 )
 
         # save TERMINAL info in replay_info.npy
@@ -686,6 +702,7 @@ def _add_keypoints_to_replay_temporal(
     description: str = "",
     clip_model=None,
     device="cpu",
+    episode_length: int = 25,
 ):
     prev_action = None
     obs = inital_obs
@@ -719,7 +736,7 @@ def _add_keypoints_to_replay_temporal(
             CAMERAS,
             t=k - next_keypoint_idx,     # t for calculate time, represent t_th keypoint
             prev_action=prev_action,
-            episode_length=25,
+            episode_length=episode_length,
         )
         tokens = clip.tokenize([description]).numpy()
         token_tensor = torch.from_numpy(tokens).to(device)
@@ -771,7 +788,7 @@ def _add_keypoints_to_replay_temporal(
         CAMERAS,
         t=k + 1 - next_keypoint_idx,
         prev_action=prev_action,
-        episode_length=25,
+        episode_length=episode_length,
     )
     obs_dict_tp1["lang_goal_embs"] = lang_embs[0].float().detach().cpu().numpy()
 
@@ -801,12 +818,14 @@ def fill_replay_temporal(
     device="cpu",
 ):
 
+    task_episode_length = get_episode_length(task)
     requested_meta = _make_replay_meta(
         start_idx=start_idx,
         num_demos=num_demos,
         demo_augmentation=demo_augmentation,
         demo_augmentation_every_n=demo_augmentation_every_n,
         crop_augmentation=crop_augmentation,
+        episode_length=task_episode_length,
     )
 
     disk_exist = False
@@ -879,6 +898,7 @@ def fill_replay_temporal(
                     description=desc,
                     clip_model=clip_model,
                     device=device,
+                    episode_length=task_episode_length,
                 )
 
         # Rank 0 writes the sentinel + metadata sidecar. Other ranks skip

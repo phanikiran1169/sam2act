@@ -52,6 +52,7 @@ from sam2act.utils.rvt_utils import (
     RLBENCH_TASKS,
 )
 from sam2act.utils.rvt_utils import load_agent_only_model as load_agent_state
+from sam2act.utils.episode_length_config import get_max_episode_length
 
 
 def get_model_size(model):
@@ -564,13 +565,21 @@ def _eval(args):
             agent_eval_log_dir = os.path.join(args.eval_log_dir, "final")
 
         os.makedirs(agent_eval_log_dir, exist_ok=True)
+        # Resolve episode_length: CLI override > per-task config > default (25).
+        resolved_episode_length = get_max_episode_length(
+            tasks_to_eval, override=args.episode_length
+        )
+        print(
+            f"[eval] episode_length={resolved_episode_length} "
+            f"(override={args.episode_length}, tasks={tasks_to_eval})"
+        )
         scores = eval(
             agent=agent,
             tasks=tasks_to_eval,
             eval_datafolder=args.eval_datafolder,
             start_episode=args.start_episode,
             eval_episodes=args.eval_episodes,
-            episode_length=args.episode_length,
+            episode_length=resolved_episode_length,
             replay_ground_truth=args.ground_truth,
             device=args.device,
             headless=args.headless,
