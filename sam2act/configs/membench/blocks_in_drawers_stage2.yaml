@@ -1,0 +1,28 @@
+# blocks_in_drawers_stage2.yaml: MemoryBench Stage 2 config for blocks_in_drawers.
+# blocks_in_drawers_stage2.yaml: D4 action-memory — model must recall own prior drawer choice.
+
+# Task
+task: blocks_in_drawers
+stage: 2
+
+# Training hyperparameters (paper Table 6)
+bs: 10                   # per-GPU batch size
+epochs: 20
+base_lr: 1.25e-5         # effective_lr = base_lr × bs × gpus
+steps_per_epoch: 625
+warmup_steps: 2000
+
+# Model config
+use_memory: true
+num_maskmem: 9           # memory window N = num_maskmem + 1 = 10 (can override via --num-maskmem)
+
+# Data
+sample_distribution_mode: demo_uniform_temporal
+
+# Scripts
+train_script: train_plus.py
+exp_cfg: configs/sam2act_plus.yaml
+mvt_cfg: mvt/configs/sam2act_plus_step_emb.yaml
+
+# Seed (for reproducibility)
+seed: 42
