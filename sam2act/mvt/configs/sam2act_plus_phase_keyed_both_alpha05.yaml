@@ -28,5 +28,5 @@ step_embedding_freq_size: 32
 step_embedding_max_period: 100
 use_phase_keyed_memory: True
 phase_key_injection: both
-phase_key_alpha: 1.0
+phase_key_alpha: 0.5
 train_step_embedder: True

@@ -150,6 +150,7 @@ class MVT_SAM2_Single(nn.Module):
         use_step_embedding=False,
         step_embedding_freq_size=32,
         step_embedding_max_period=100,
+        train_step_embedder=False,  # consumed by MVT_SAM2's freeze filter; unused here
         use_phase_keyed_memory=False,
         phase_key_injection="both",
         phase_key_alpha=1.0,
