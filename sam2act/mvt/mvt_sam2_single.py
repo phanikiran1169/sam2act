@@ -155,6 +155,12 @@ class MVT_SAM2_Single(nn.Module):
         phase_key_injection="both",
         phase_key_alpha=1.0,
         phase_key_alpha_learnable=False,
+        use_phase_anchors=False,
+        max_phase_anchors=6,
+        anchor_detect_gripper=True,
+        anchor_detect_step_emb_delta=True,
+        anchor_step_emb_delta_threshold=0.15,
+        anchor_settle_frames=2,
         renderer_device="cuda:0",
         renderer=None,
         no_feat=False,
@@ -407,6 +413,46 @@ class MVT_SAM2_Single(nn.Module):
         # current batch's step_idx (curr_obs_idx is sequence-local).
         self._current_step_idx = None
 
+        # Phase-persistent memory anchors (Stage 2).
+        # Adds up to P permanent slots alongside the FIFO bank. Phase
+        # transitions detected via gripper-open threshold and/or step-emb
+        # cosine delta. No-op when use_phase_anchors is False.
+        self.use_phase_anchors = use_phase_anchors
+        self.max_phase_anchors = max_phase_anchors
+        self.anchor_detect_gripper = anchor_detect_gripper
+        self.anchor_detect_step_emb_delta = anchor_detect_step_emb_delta
+        self.anchor_step_emb_delta_threshold = anchor_step_emb_delta_threshold
+        self.anchor_settle_frames = anchor_settle_frames
+        if self.use_phase_anchors:
+            assert anchor_detect_gripper or anchor_detect_step_emb_delta, (
+                "use_phase_anchors=True requires at least one detector "
+                "(anchor_detect_gripper or anchor_detect_step_emb_delta)"
+            )
+            # Share the step embedder with phase-keyed path / Stage 0 proprio
+            # when already constructed; otherwise build a dedicated one.
+            if (
+                not hasattr(self, "step_embedder")
+                and self.anchor_detect_step_emb_delta
+            ):
+                self.step_embedder = StepEmbedder(
+                    hidden_dim=32,
+                    frequency_embedding_size=step_embedding_freq_size,
+                    max_period=step_embedding_max_period,
+                )
+            # Learnable positional encoding for anchor slots, analogous to
+            # maskmem_tpos_enc [num_maskmem, 1, 1, mem_dim=64].
+            self.anchor_tpos_enc = nn.Parameter(
+                torch.zeros(max_phase_anchors, 1, 1, 64)
+            )
+        # Per-episode transition-detection state — reset by reset_memory_bank.
+        self._anchor_bank_multiview = None
+        self._current_phase = 0
+        self._candidate_phase = 0
+        self._settle_counter = 0
+        self._prev_gripper_state = None
+        self._prev_step_emb = None
+        self._current_proprio = None
+
         self.patchify = Conv2DBlock(
             7 if self.ifsep else 10,
             self.feat_img_dim,
@@ -643,6 +689,60 @@ class MVT_SAM2_Single(nn.Module):
     def reset_memory_bank(self):
         self.memory_bank_multiview = [{} for _ in range(3)] if self.rend_three_views else [{} for _ in range(5)]
         self.curr_obs_idx = 0
+        # Phase-anchor per-episode state reset. Anchor bank + transition
+        # detectors must start fresh at each new sequence.
+        if self.use_phase_anchors:
+            num_views = 3 if self.rend_three_views else 5
+            self._anchor_bank_multiview = [{} for _ in range(num_views)]
+            self._current_phase = 0
+            self._candidate_phase = 0
+            self._settle_counter = 0
+            self._prev_gripper_state = None
+            self._prev_step_emb = None
+
+    def _detect_phase_transition(self, idx):
+        """Return True if a phase transition was detected at keyframe `idx`.
+
+        Two independent detectors with OR logic:
+        - gripper event: proprio[:, 0] > 0.5 crossing between consecutive
+          frames (binarized with hysteresis via settle_frames downstream).
+        - step-embedding cosine delta: cosine distance on the raw sinusoidal
+          features (not the MLP output — the sinusoidal is deterministic and
+          comparable across training checkpoints).
+
+        Updates detector state (_prev_gripper_state, _prev_step_emb) as a
+        side effect.
+        """
+        triggered = False
+
+        if self.anchor_detect_gripper and self._current_proprio is not None:
+            current_gripper = (self._current_proprio[idx, 0] > 0.5).item()
+            if (
+                self._prev_gripper_state is not None
+                and current_gripper != self._prev_gripper_state
+            ):
+                triggered = True
+            self._prev_gripper_state = current_gripper
+
+        if (
+            self.anchor_detect_step_emb_delta
+            and self._current_step_idx is not None
+        ):
+            step_t = self._current_step_idx[idx : idx + 1]
+            cur_emb = StepEmbedder.sinusoidal(
+                step_t,
+                self.step_embedder.frequency_embedding_size,
+                self.step_embedder.max_period,
+            )  # [1, 32]
+            if self._prev_step_emb is not None:
+                cos_sim = F.cosine_similarity(
+                    cur_emb, self._prev_step_emb, dim=-1
+                ).item()
+                if (1.0 - cos_sim) > self.anchor_step_emb_delta_threshold:
+                    triggered = True
+            self._prev_step_emb = cur_emb.detach()
+
+        return triggered
 
     def sam2_forward_with_memory(self, net, idx, num_views, feat_sizes):
         GPUdevice = self.rank
@@ -662,29 +762,49 @@ class MVT_SAM2_Single(nn.Module):
             memory_bank_list = self.memory_bank_multiview[view_idx]
             t_pos_and_prevs = []
 
-            if len(memory_bank_list) > 0:
-                num_mem = min(len(memory_bank_list), net.num_maskmem)
+            # Phase-anchor bank for this view (empty dict if anchors disabled
+            # or none written yet).
+            anchor_bank = (
+                self._anchor_bank_multiview[view_idx]
+                if (self.use_phase_anchors and self._anchor_bank_multiview is not None)
+                else {}
+            )
+            has_fifo = len(memory_bank_list) > 0
+            has_anchors = len(anchor_bank) > 0
 
-                for t_pos in range(1, num_mem + 1):
-                    # here t_pos is "how many act away from the current act"
-                    t_pos_and_prevs.append((t_pos, memory_bank_list.get(self.curr_obs_idx - t_pos))) 
-
+            if has_fifo or has_anchors:
                 to_cat_memory = []
                 to_cat_memory_pos_embed = []
 
-                for t_pos, prev in t_pos_and_prevs:
-                    # "maskmem_features" might have been offloaded to CPU in demo use cases,
-                    # so we load it back to GPU (it's a no-op if it's already on GPU).
-                    feats = prev[0].cuda()
-                    to_cat_memory.append(feats)
-                    # Spatial positional encoding (it might have been offloaded to CPU in eval)
-                    maskmem_enc = prev[1].cuda()
-                    # Temporal positional encoding
-                    # the smaller the index, the closer in time
-                    maskmem_enc = (
-                        maskmem_enc + net.maskmem_tpos_enc[t_pos - 1]
-                    )
-                    to_cat_memory_pos_embed.append(maskmem_enc)
+                if has_fifo:
+                    num_mem = min(len(memory_bank_list), net.num_maskmem)
+
+                    for t_pos in range(1, num_mem + 1):
+                        # here t_pos is "how many act away from the current act"
+                        t_pos_and_prevs.append((t_pos, memory_bank_list.get(self.curr_obs_idx - t_pos)))
+
+                    for t_pos, prev in t_pos_and_prevs:
+                        # "maskmem_features" might have been offloaded to CPU in demo use cases,
+                        # so we load it back to GPU (it's a no-op if it's already on GPU).
+                        feats = prev[0].cuda()
+                        to_cat_memory.append(feats)
+                        # Spatial positional encoding (it might have been offloaded to CPU in eval)
+                        maskmem_enc = prev[1].cuda()
+                        # Temporal positional encoding
+                        # the smaller the index, the closer in time
+                        maskmem_enc = (
+                            maskmem_enc + net.maskmem_tpos_enc[t_pos - 1]
+                        )
+                        to_cat_memory_pos_embed.append(maskmem_enc)
+
+                if has_anchors:
+                    # Anchors are concatenated AFTER FIFO. memory_attention is
+                    # order-agnostic at the dot-product level — entries are
+                    # differentiated only via memory_pos (FIFO: recency tag;
+                    # anchors: anchor_tpos_enc[slot] already baked into pos).
+                    for anchor_slot, (feat, pos) in sorted(anchor_bank.items()):
+                        to_cat_memory.append(feat.cuda())
+                        to_cat_memory_pos_embed.append(pos.cuda())
 
                 memory_fused = torch.cat(to_cat_memory, dim=0)
                 memory_pos_fused = torch.cat(to_cat_memory_pos_embed, dim=0)
@@ -737,6 +857,28 @@ class MVT_SAM2_Single(nn.Module):
 
     def sam2_add_new_memory(self, net, hm, idx, num_views, feat_sizes):
         GPUdevice = self.rank
+
+        # --- Frame-scope phase-anchor transition logic ---
+        # Detection + settle counter run once per FRAME, before the per-view
+        # loop. If they ran per-view the first view's commit would advance
+        # self._current_phase and subsequent views would skip the write.
+        anchor_commit_slot = None
+        if self.use_phase_anchors:
+            transition_detected = self._detect_phase_transition(idx)
+            if transition_detected:
+                self._candidate_phase = min(
+                    self._current_phase + 1, self.max_phase_anchors - 1
+                )
+                self._settle_counter = 0
+            elif self._candidate_phase > self._current_phase:
+                self._settle_counter += 1
+            if (
+                self._candidate_phase > self._current_phase
+                and self._settle_counter >= self.anchor_settle_frames
+            ):
+                anchor_commit_slot = self._candidate_phase
+            # Do NOT advance self._current_phase yet — update after the view
+            # loop so every view writes the same slot on this frame.
 
         for view_idx in range(num_views):
                 
@@ -796,6 +938,29 @@ class MVT_SAM2_Single(nn.Module):
 
             memory_bank_list[self.curr_obs_idx] = [memory, memory_pos]
 
+            # Per-view phase-anchor write. Uses the already-phase-keyed
+            # memory_pos so the anchor inherits its creation-phase tag, plus
+            # anchor_tpos_enc[slot] as a persistent phase-slot identifier.
+            if self.use_phase_anchors and anchor_commit_slot is not None:
+                # Cast anchor_tpos_enc to memory_pos.dtype for autocast safety
+                # (anchor_tpos_enc is always fp32; memory_pos may be bf16).
+                anchor_tag = self.anchor_tpos_enc[anchor_commit_slot].view(
+                    1, 1, 64
+                ).to(memory_pos.dtype)
+                anchor_pos = memory_pos + anchor_tag
+                # clone() preserves autograd lineage; we intentionally DO NOT
+                # detach so anchor_tpos_enc and the encoder weights receive
+                # gradient when this anchor is retrieved later in the episode.
+                self._anchor_bank_multiview[view_idx][anchor_commit_slot] = [
+                    memory.clone(),
+                    anchor_pos.clone(),
+                ]
+
+        # --- Frame-scope phase counter advance after all views wrote ---
+        if self.use_phase_anchors and anchor_commit_slot is not None:
+            self._current_phase = anchor_commit_slot
+            self._settle_counter = 0
+
     def forward(
         self,
         img,
@@ -831,6 +996,22 @@ class MVT_SAM2_Single(nn.Module):
                 "use_phase_keyed_memory=True requires step_idx to be passed to forward()"
             )
         self._current_step_idx = step_idx
+
+        # Stash proprio so the memory helpers can read gripper_open
+        # (proprio[:, 0], verified in libs/peract/helpers/utils.py:342-344)
+        # for phase-transition detection.
+        if self.use_phase_anchors:
+            assert proprio is not None, (
+                "use_phase_anchors=True requires proprio to be passed to forward()"
+            )
+            if self.anchor_detect_step_emb_delta:
+                assert step_idx is not None, (
+                    "use_phase_anchors with step_emb_delta detector requires "
+                    "step_idx to be passed to forward()"
+                )
+            # Stash only under the guard so flag-off runs remain bit-identical
+            # to baseline and do not hold GPU-tensor references across calls.
+            self._current_proprio = proprio
 
         img_raw = img.clone()
         img = img.view(bs * num_img, img_feat_dim, h, w)

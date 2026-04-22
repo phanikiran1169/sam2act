@@ -77,6 +77,17 @@ _C.phase_key_injection = "both"       # one of: "both" | "write" | "read"
 _C.phase_key_alpha = 1.0              # float scalar; initial value when learnable
 _C.phase_key_alpha_learnable = False  # when True, alpha becomes an nn.Parameter
 
+# Phase-persistent memory anchors (Stage 2). Adds P permanent slots to the
+# memory bank that are never evicted. Phase transitions detected via
+# gripper-open thresholding and/or step-embedding cosine delta. No-op when
+# use_phase_anchors is False.
+_C.use_phase_anchors = False
+_C.max_phase_anchors = 6                   # P: max persistent anchor slots
+_C.anchor_detect_gripper = True            # gripper open/close triggers transition
+_C.anchor_detect_step_emb_delta = True     # cosine-delta on step embedding triggers
+_C.anchor_step_emb_delta_threshold = 0.15  # cosine-distance threshold for the delta
+_C.anchor_settle_frames = 2                # frames the candidate phase must hold
+
 def get_cfg_defaults():
     """Get a yacs CfgNode object with default values for my_project."""
     return _C.clone()
