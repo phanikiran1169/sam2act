@@ -42,6 +42,10 @@ class DrawerClosedCondition(Condition):
     def condition_met(self):
         y = self._shape.get_position()[1]
         met = abs(y - self._closed_y) < self._threshold
+        if _BID_DEBUG and not met:
+            _bid_log(f'COND DrawerClosed FAIL shape={self._shape.get_name()} '
+                     f'y={y:+.4f} baseline={self._closed_y:+.4f} '
+                     f'delta={y - self._closed_y:+.4f} threshold={self._threshold}')
         return met, False
 
 
@@ -62,12 +66,20 @@ class BlocksInDifferentDrawers(Condition):
             for b in self._blocks
         ]
         if any(not h for h in hits):
+            if _BID_DEBUG:
+                _bid_log(f'COND BlocksInDiff FAIL — block missing from all drawers. hits={hits}')
             return False, False
         # Each block in some drawer; the three hit-sets must be
         # pairwise disjoint (no two blocks share a drawer).
-        if not hits[0].isdisjoint(hits[1]): return False, False
-        if not hits[0].isdisjoint(hits[2]): return False, False
-        if not hits[1].isdisjoint(hits[2]): return False, False
+        if not hits[0].isdisjoint(hits[1]):
+            if _BID_DEBUG: _bid_log(f'COND BlocksInDiff FAIL — block1+block2 share a drawer. hits={hits}')
+            return False, False
+        if not hits[0].isdisjoint(hits[2]):
+            if _BID_DEBUG: _bid_log(f'COND BlocksInDiff FAIL — block1+block3 share a drawer. hits={hits}')
+            return False, False
+        if not hits[1].isdisjoint(hits[2]):
+            if _BID_DEBUG: _bid_log(f'COND BlocksInDiff FAIL — block2+block3 share a drawer. hits={hits}')
+            return False, False
         return True, False
 
 
@@ -84,9 +96,9 @@ DRAWER_TRAVEL = -0.21
 HANDLE_APPROACH_DY = -0.042
 
 # Joint motor force used to hold inactive drawers against arm-brush drift.
-# See blocks_in_drawers.py for tuning rationale. 3 N resists brush contact
-# while still yielding to a firm grasp pull.
-DRAWER_BRAKE_FORCE = 3.0
+# See blocks_in_drawers.py for tuning rationale. Set to 0 disables motor
+# resistance entirely (joints behave like the .ttm default — fully passive).
+DRAWER_BRAKE_FORCE = 0.0
 
 BLOCK_SIZE = [0.04, 0.04, 0.04]
 BLOCK_HALF = BLOCK_SIZE[2] / 2
@@ -276,6 +288,17 @@ class BlocksInDrawersHard(Task):
 
     # -- gripper callbacks ---------------------------------------------------
 
+    def _dump_drawer_shapes(self, tag):
+        if not _BID_DEBUG:
+            return
+        try:
+            parts = []
+            for n in DRAWER_NAMES:
+                parts.append(f'{n}=y{self._drawer_shapes[n].get_position()[1]:+.4f}')
+            _bid_log(f'{tag} drawer_shapes: ' + ' '.join(parts))
+        except Exception as e:
+            _bid_log(f'{tag} dump-err: {e}')
+
     def _make_close(self, target: Shape):
         def _fn(_waypoint):
             gripper = self.robot.gripper
@@ -296,6 +319,7 @@ class BlocksInDrawersHard(Task):
         self._close_grip_drawer_by_name(self._d3)
 
     def _close_grip_drawer_by_name(self, drawer_name):
+        self._dump_drawer_shapes(f'GRIP-DRAWER {drawer_name} pre')
         gripper = self.robot.gripper
         done = False
         while not done:
@@ -311,8 +335,10 @@ class BlocksInDrawersHard(Task):
                 continue
             pos = j.get_joint_position()
             j.set_joint_interval(False, [pos, 0.0])
+        self._dump_drawer_shapes(f'GRIP-DRAWER {drawer_name} post-lock')
 
     def _open(self, _waypoint):
+        self._dump_drawer_shapes('RELEASE pre')
         gripper = self.robot.gripper
         gripper.release()
         done = False
@@ -324,6 +350,7 @@ class BlocksInDrawersHard(Task):
         for j in self._drawer_joints.values():
             j.set_joint_interval(False, [0.0, 0.21])
         self._active_drawer_name = None
+        self._dump_drawer_shapes('RELEASE post')
 
     def _skip_collisions(self, waypoint):
         waypoint._ignore_collisions = True
@@ -404,7 +431,7 @@ class BlocksInDrawersHard(Task):
             [ConditionSet(self.goal_conditions, order_matters=False)])
 
         return [
-            'put each block in a different drawer and close the drawers',
+            'put each of the three blocks in a different drawer and close the drawers',
             'store the three blocks in three separate drawers',
             'place the blocks in different drawers and close each one',
         ]
@@ -465,7 +492,17 @@ class BlocksInDrawersHard(Task):
         wp.set_orientation(orientation)
 
     def step(self) -> None:
-        pass
+        if _BID_DEBUG and os.environ.get('BID_DEBUG_STEP', '0') not in ('0', '', 'false', 'False'):
+            try:
+                bp = [self._block1.get_position(),
+                      self._block2.get_position(),
+                      self._block3.get_position()]
+                _bid_log(f'STEP blocks: '
+                         f'b1=[{bp[0][0]:.3f},{bp[0][1]:.3f},{bp[0][2]:.3f}] '
+                         f'b2=[{bp[1][0]:.3f},{bp[1][1]:.3f},{bp[1][2]:.3f}] '
+                         f'b3=[{bp[2][0]:.3f},{bp[2][1]:.3f},{bp[2][2]:.3f}]')
+            except Exception:
+                pass
 
     def variation_count(self) -> int:
         return len(VARIATIONS)

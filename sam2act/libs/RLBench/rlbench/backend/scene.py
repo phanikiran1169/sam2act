@@ -442,6 +442,19 @@ class Scene(object):
 
         success, term = self.task.success()
         if not success:
+            try:
+                conds = self.task._success_conditions or []
+                print(f'[demo-fail] task={self.task.get_name()} conds:')
+                for c in conds:
+                    if hasattr(c, '_conditions'):
+                        for sub in c._conditions:
+                            ok, _ = sub.condition_met()
+                            print(f'  {type(sub).__name__}: met={ok}')
+                    else:
+                        ok, _ = c.condition_met()
+                        print(f'  {type(c).__name__}: met={ok}')
+            except Exception as e:
+                print(f'[demo-fail] diag err: {e}')
             raise DemoError('Demo was completed, but was not successful.',
                             self.task)
         return Demo(demo)

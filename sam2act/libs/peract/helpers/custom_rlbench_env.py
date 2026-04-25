@@ -34,6 +34,14 @@ def _resolve_cam_placeholder(task_name: str) -> Dummy:
     return Dummy(name)
 
 
+def _is_custom_cam_placeholder(task_name: str) -> bool:
+    """True if the task has its own placeholder resolved (not the default).
+    Callers use this to skip the default 135° base rotation, which only
+    makes sense for the original 'cam_cinematic_placeholder' pose."""
+    name = _TASK_CAM_PLACEHOLDER.get(task_name)
+    return name is not None and Object.exists(name)
+
+
 
 class CustomRLBenchEnv(RLBenchEnv):
 
@@ -114,8 +122,9 @@ class CustomRLBenchEnv(RLBenchEnv):
         if self.eval:
             task_name = change_case(self._task._task.__class__.__name__)
             cam_placeholder = _resolve_cam_placeholder(task_name)
-            cam_base = Dummy('cam_cinematic_base')
-            cam_base.rotate([0, 0, np.pi * 0.75])
+            if not _is_custom_cam_placeholder(task_name):
+                cam_base = Dummy('cam_cinematic_base')
+                cam_base.rotate([0, 0, np.pi * 0.75])
             self._record_cam = VisionSensor.create([1920, 1080])
             self._record_cam.set_explicit_handling(True)
             self._record_cam.set_pose(cam_placeholder.get_pose())
@@ -297,8 +306,9 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         if self.eval:
             task_name = change_case(self._task._task.__class__.__name__)
             cam_placeholder = _resolve_cam_placeholder(task_name)
-            cam_base = Dummy('cam_cinematic_base')
-            cam_base.rotate([0, 0, np.pi * 0.75])
+            if not _is_custom_cam_placeholder(task_name):
+                cam_base = Dummy('cam_cinematic_base')
+                cam_base.rotate([0, 0, np.pi * 0.75])
             self._record_cam = VisionSensor.create([1920, 1080])
             self._record_cam.set_explicit_handling(True)
             self._record_cam.set_pose(cam_placeholder.get_pose())

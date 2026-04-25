@@ -97,9 +97,10 @@ DRAWER_TRAVEL = -0.21            # closed -> open, in -Y
 HANDLE_APPROACH_DY = -0.042      # pre-approach offset from closed handle
 
 # Joint motor force used to hold inactive drawers against arm-brush drift.
-# Enabled in init_task. Tuning knob: too low -> drawers still drift; too
-# high -> the robot cannot pull the target drawer open. Starting at 3 N.
-DRAWER_BRAKE_FORCE = 3.0
+# Enabled in init_task. Empirically, set_joint_interval pinning is enough
+# on its own — set to 0.0 to disable motor resistance (joints behave like
+# the .ttm default, fully passive).
+DRAWER_BRAKE_FORCE = 0.0
 
 # Block properties. Blocks are identical red cubes; spawn positions are
 # sampled per-episode from zones derived from the `boundary` shape.
@@ -480,7 +481,7 @@ class BlocksInDrawers(Task):
             [ConditionSet(self.goal_conditions, order_matters=False)])
 
         return [
-            'put each block in a different drawer and close the drawers',
+            'put each of the two blocks in a different drawer and close the drawers',
             'store the two blocks in two separate drawers',
             'place the blocks in different drawers and close each one',
         ]
