@@ -150,6 +150,11 @@ class MVT_SAM2_Single(nn.Module):
         use_step_embedding=False,
         step_embedding_freq_size=32,
         step_embedding_max_period=100,
+        train_step_embedder=False,  # consumed by MVT_SAM2's freeze filter; unused here
+        use_phase_keyed_memory=False,
+        phase_key_injection="both",
+        phase_key_alpha=1.0,
+        phase_key_alpha_learnable=False,
         renderer_device="cuda:0",
         renderer=None,
         no_feat=False,
@@ -358,6 +363,49 @@ class MVT_SAM2_Single(nn.Module):
             # Learnable scalar to rebalance step and proprio contributions.
             # Init=1.0 preserves p + step_emb; gradient descent adjusts.
             self.step_embedding_alpha = nn.Parameter(torch.ones(1))
+
+        # Phase-keyed memory retrieval (Stage 2 memory attention).
+        # Injects the step-embedding signal into the memory K/Q positional
+        # channel so cross-attention scores by phase proximity in addition
+        # to visual similarity. No-op when the flag is False.
+        self.use_phase_keyed_memory = use_phase_keyed_memory
+        self.phase_key_injection = phase_key_injection
+        if self.use_phase_keyed_memory:
+            assert self.phase_key_injection in ("both", "write", "read"), (
+                f"phase_key_injection must be one of both|write|read, got {phase_key_injection!r}"
+            )
+            # Share self.step_embedder with the proprio path when available
+            # so phase codes are learned from one canonical per-keypoint MLP.
+            if not hasattr(self, "step_embedder"):
+                self.step_embedder = StepEmbedder(
+                    hidden_dim=32,
+                    frequency_embedding_size=step_embedding_freq_size,
+                    max_period=step_embedding_max_period,
+                )
+            # Project 32d sinusoidal+MLP code into the memory (64d) and
+            # query (128d) positional channels separately.
+            self.phase_to_mem = nn.Linear(step_embedding_freq_size, 64)
+            self.phase_to_query = nn.Linear(step_embedding_freq_size, 128)
+            if phase_key_alpha_learnable:
+                # Init to the configured float so learnable and fixed variants
+                # start from the same effective gain.
+                self.phase_key_alpha = nn.Parameter(
+                    torch.tensor(float(phase_key_alpha))
+                )
+            else:
+                # Non-persistent buffer keeps alpha out of state_dict so it is
+                # re-initialized from config on load. Backward compatibility
+                # with old checkpoints relies on the repo's existing
+                # strict=False fallback, not this choice.
+                self.register_buffer(
+                    "phase_key_alpha",
+                    torch.tensor(float(phase_key_alpha)),
+                    persistent=False,
+                )
+        # Set lazily by forward() before sam2_{add_new,forward_with}_memory
+        # so both helpers can source the absolute keypoint index from the
+        # current batch's step_idx (curr_obs_idx is sequence-local).
+        self._current_step_idx = None
 
         self.patchify = Conv2DBlock(
             7 if self.ifsep else 10,
@@ -640,13 +688,33 @@ class MVT_SAM2_Single(nn.Module):
 
                 memory_fused = torch.cat(to_cat_memory, dim=0)
                 memory_pos_fused = torch.cat(to_cat_memory_pos_embed, dim=0)
-                
+
                 '''memory attention'''
+
+                curr_pos_read = vision_pos_embeds[-1]  # [256, 1, 128]
+                if (
+                    self.use_phase_keyed_memory
+                    and self.phase_key_injection in ("both", "read")
+                ):
+                    # Slice to the current sample: the outer loop iterates
+                    # idx over num_seq*num_obs, so we need one scalar step
+                    # per helper call (memory_pos shape enforces B=1 in the
+                    # middle dim).
+                    step_t = self._current_step_idx[idx : idx + 1]
+                    sinu = StepEmbedder.sinusoidal(
+                        step_t,
+                        self.step_embedder.frequency_embedding_size,
+                        self.step_embedder.max_period,
+                    )  # [1, 32]
+                    phase_q = self.phase_to_query(sinu)  # [1, 128]
+                    phase_q = phase_q.to(curr_pos_read.dtype)
+                    # Broadcast over the 256 spatial tokens of the query.
+                    curr_pos_read = curr_pos_read + self.phase_key_alpha * phase_q.view(1, 1, 128)
 
                 # with autocast(dtype=torch.bfloat16):
                 pix_feat_with_mem = net.memory_attention(
                     curr=[vision_feats[-1]],
-                    curr_pos=[vision_pos_embeds[-1]],
+                    curr_pos=[curr_pos_read],
                     memory=memory_fused,
                     memory_pos=memory_pos_fused,
                     num_obj_ptr_tokens=0
@@ -706,6 +774,23 @@ class MVT_SAM2_Single(nn.Module):
 
             memory = maskmem_features.flatten(2).permute(2, 0, 1).reshape(-1, 1, net.mem_dim)
             memory_pos = maskmem_pos_enc.flatten(2).permute(2, 0, 1).reshape(-1, 1, net.mem_dim)
+            # memory_pos shape: [4096, 1, 64]
+
+            if self.use_phase_keyed_memory and self.phase_key_injection in ("both", "write"):
+                # Drive phase code from the absolute keypoint index stashed by
+                # forward(); curr_obs_idx is sequence-local and not suitable.
+                # Slice to the current sample: one scalar step per helper call.
+                step_t = self._current_step_idx[idx : idx + 1]
+                sinu = StepEmbedder.sinusoidal(
+                    step_t,
+                    self.step_embedder.frequency_embedding_size,
+                    self.step_embedder.max_period,
+                )  # [1, 32]
+                phase_mem = self.phase_to_mem(sinu)  # [1, 64]
+                phase_mem = phase_mem.to(memory_pos.dtype)
+                # Out-of-place add (NEVER +=) so the bank stores a fresh tensor
+                # rather than aliasing one that later writes could mutate.
+                memory_pos = memory_pos + self.phase_key_alpha * phase_mem.view(1, 1, 64)
 
             memory_bank_list = self.memory_bank_multiview[view_idx]
 
@@ -737,6 +822,15 @@ class MVT_SAM2_Single(nn.Module):
         assert num_img == self.num_img
         # assert img_feat_dim == self.img_feat_dim
         assert h == w == self.img_size
+
+        # Make step_idx visible to sam2_add_new_memory and
+        # sam2_forward_with_memory so phase-keyed injection uses the absolute
+        # keypoint index rather than the sequence-local curr_obs_idx counter.
+        if self.use_phase_keyed_memory:
+            assert step_idx is not None, (
+                "use_phase_keyed_memory=True requires step_idx to be passed to forward()"
+            )
+        self._current_step_idx = step_idx
 
         img_raw = img.clone()
         img = img.view(bs * num_img, img_feat_dim, h, w)

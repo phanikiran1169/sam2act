@@ -1,10 +1,19 @@
 # blocks_in_drawers_hard.py: MemoryBench task -- 3-block, 3-drawer variant.
 # blocks_in_drawers_hard.py: Scales blocks_in_drawers to test deeper D4 recall.
 
+import os
 from itertools import permutations
 from typing import List
 
 import numpy as np
+
+# Debug prints gated on BID_DEBUG=1. Mirrors blocks_in_drawers.py.
+_BID_DEBUG = os.environ.get('BID_DEBUG', '0') not in ('0', '', 'false', 'False')
+
+
+def _bid_log(msg):
+    if _BID_DEBUG:
+        print(f'[bid-hard-debug] {msg}', flush=True)
 
 from pyrep.const import PrimitiveShape
 from pyrep.objects.dummy import Dummy
@@ -19,14 +28,59 @@ from rlbench.backend.conditions import (
 
 
 class DrawerClosedCondition(Condition):
-    """Succeeds when the drawer joint position is below `threshold` (m)."""
-    def __init__(self, joint: Joint, threshold: float = 0.03):
-        self._joint = joint
+    """Succeeds when the drawer SHAPE is within `threshold` of its
+    per-episode closed-y baseline. See blocks_in_drawers.py for the
+    full rationale (shape-y is immune to gripper.grasp() reparenting
+    which desyncs the joint's intrinsic DOF reading).
+    """
+    def __init__(self, drawer_shape: Shape, closed_y: float,
+                 threshold: float = 0.03):
+        self._shape = drawer_shape
+        self._closed_y = closed_y
         self._threshold = threshold
 
     def condition_met(self):
-        met = abs(self._joint.get_joint_position()) < self._threshold
+        y = self._shape.get_position()[1]
+        met = abs(y - self._closed_y) < self._threshold
+        if _BID_DEBUG and not met:
+            _bid_log(f'COND DrawerClosed FAIL shape={self._shape.get_name()} '
+                     f'y={y:+.4f} baseline={self._closed_y:+.4f} '
+                     f'delta={y - self._closed_y:+.4f} threshold={self._threshold}')
         return met, False
+
+
+class BlocksInDifferentDrawers(Condition):
+    """Task goal: each of three blocks sits inside SOME drawer, and all
+    three blocks occupy DIFFERENT drawers. The language goal doesn't
+    name specific drawers -- d1/d2/d3 are demo-generation scaffolding
+    only, not part of task identity.
+    """
+    def __init__(self, block1: Shape, block2: Shape, block3: Shape,
+                 sensors: List[ProximitySensor]):
+        self._blocks = [block1, block2, block3]
+        self._sensors = list(sensors)
+
+    def condition_met(self):
+        hits = [
+            {i for i, s in enumerate(self._sensors) if s.is_detected(b)}
+            for b in self._blocks
+        ]
+        if any(not h for h in hits):
+            if _BID_DEBUG:
+                _bid_log(f'COND BlocksInDiff FAIL — block missing from all drawers. hits={hits}')
+            return False, False
+        # Each block in some drawer; the three hit-sets must be
+        # pairwise disjoint (no two blocks share a drawer).
+        if not hits[0].isdisjoint(hits[1]):
+            if _BID_DEBUG: _bid_log(f'COND BlocksInDiff FAIL — block1+block2 share a drawer. hits={hits}')
+            return False, False
+        if not hits[0].isdisjoint(hits[2]):
+            if _BID_DEBUG: _bid_log(f'COND BlocksInDiff FAIL — block1+block3 share a drawer. hits={hits}')
+            return False, False
+        if not hits[1].isdisjoint(hits[2]):
+            if _BID_DEBUG: _bid_log(f'COND BlocksInDiff FAIL — block2+block3 share a drawer. hits={hits}')
+            return False, False
+        return True, False
 
 
 DRAWER_NAMES = ['bottom', 'middle', 'top']
@@ -40,6 +94,11 @@ GRIPPER_ABOVE = [-3.1416, 0.0, 1.5708]
 # direct copy, so the same constants apply). Drawer slides along -Y.
 DRAWER_TRAVEL = -0.21
 HANDLE_APPROACH_DY = -0.042
+
+# Joint motor force used to hold inactive drawers against arm-brush drift.
+# See blocks_in_drawers.py for tuning rationale. Set to 0 disables motor
+# resistance entirely (joints behave like the .ttm default — fully passive).
+DRAWER_BRAKE_FORCE = 0.0
 
 BLOCK_SIZE = [0.04, 0.04, 0.04]
 BLOCK_HALF = BLOCK_SIZE[2] / 2
@@ -95,6 +154,19 @@ class BlocksInDrawersHard(Task):
         self._drawer_shapes = {
             name: Shape(f'drawer_{name}') for name in DRAWER_NAMES
         }
+
+        # Soft-braked velocity-locked motor on every drawer joint. The .ttm
+        # ships with motor disabled in FORCE mode, so the joint is purely
+        # passive and any contact force moves it freely. Enabling the motor
+        # with target velocity 0 and a 3 N force lets the joint resist arm
+        # brushes while still yielding to a firm grasp pull.
+        for j in self._drawer_joints.values():
+            j.set_motor_enabled(True)
+            j.set_control_loop_enabled(False)
+            j.set_joint_target_velocity(0.0)
+            j.set_motor_locked_at_zero_velocity(True)
+            j.set_joint_force(DRAWER_BRAKE_FORCE)
+
         self._drawer_sensors = {
             name: ProximitySensor(f'success_{name}') for name in DRAWER_NAMES
         }
@@ -216,6 +288,17 @@ class BlocksInDrawersHard(Task):
 
     # -- gripper callbacks ---------------------------------------------------
 
+    def _dump_drawer_shapes(self, tag):
+        if not _BID_DEBUG:
+            return
+        try:
+            parts = []
+            for n in DRAWER_NAMES:
+                parts.append(f'{n}=y{self._drawer_shapes[n].get_position()[1]:+.4f}')
+            _bid_log(f'{tag} drawer_shapes: ' + ' '.join(parts))
+        except Exception as e:
+            _bid_log(f'{tag} dump-err: {e}')
+
     def _make_close(self, target: Shape):
         def _fn(_waypoint):
             gripper = self.robot.gripper
@@ -236,6 +319,7 @@ class BlocksInDrawersHard(Task):
         self._close_grip_drawer_by_name(self._d3)
 
     def _close_grip_drawer_by_name(self, drawer_name):
+        self._dump_drawer_shapes(f'GRIP-DRAWER {drawer_name} pre')
         gripper = self.robot.gripper
         done = False
         while not done:
@@ -251,8 +335,10 @@ class BlocksInDrawersHard(Task):
                 continue
             pos = j.get_joint_position()
             j.set_joint_interval(False, [pos, 0.0])
+        self._dump_drawer_shapes(f'GRIP-DRAWER {drawer_name} post-lock')
 
     def _open(self, _waypoint):
+        self._dump_drawer_shapes('RELEASE pre')
         gripper = self.robot.gripper
         gripper.release()
         done = False
@@ -264,6 +350,7 @@ class BlocksInDrawersHard(Task):
         for j in self._drawer_joints.values():
             j.set_joint_interval(False, [0.0, 0.21])
         self._active_drawer_name = None
+        self._dump_drawer_shapes('RELEASE post')
 
     def _skip_collisions(self, waypoint):
         waypoint._ignore_collisions = True
@@ -291,6 +378,13 @@ class BlocksInDrawersHard(Task):
             j = self._drawer_joints[name]
             j.set_joint_interval(False, [0.0, 0.21])
             j.set_joint_position(0.0, disable_dynamics=True)
+
+        # Closed-y baseline for DrawerClosedCondition -- captured right after
+        # the reset above. All three drawer shapes are identical, so one
+        # sample suffices. Frame-agnostic (any offset cancels in the delta).
+        self._closed_y = float(
+            self._drawer_shapes[DRAWER_NAMES[0]].get_position()[1])
+        _bid_log(f'INIT closed_y baseline={self._closed_y:+.4f}')
 
         # Randomize block positions within fixed spawn zones. Each block is
         # assigned to its own X-strip; block-to-strip assignment is shuffled
@@ -320,22 +414,24 @@ class BlocksInDrawersHard(Task):
             print(f'  wp{idx:2d}: pos=[{pos[0]:.3f}, {pos[1]:.3f}, '
                   f'{pos[2]:.3f}] ori={[round(o,3) for o in ori]}')
 
-        # Success: all three blocks inside their target drawers, all three
-        # drawers closed at the end, and nothing grasped.
+        # Success: each block in some drawer, all three in DIFFERENT
+        # drawers (permutation-invariant; d1/d2/d3 are demo-gen scaffolding
+        # only -- lang goal doesn't name drawers). All three drawers must be
+        # closed at the end, and nothing grasped.
         self.goal_conditions = [
-            DetectedCondition(self._block1, self._drawer_sensors[d1]),
-            DetectedCondition(self._block2, self._drawer_sensors[d2]),
-            DetectedCondition(self._block3, self._drawer_sensors[d3]),
-            DrawerClosedCondition(self._drawer_joints[d1]),
-            DrawerClosedCondition(self._drawer_joints[d2]),
-            DrawerClosedCondition(self._drawer_joints[d3]),
+            BlocksInDifferentDrawers(
+                self._block1, self._block2, self._block3,
+                list(self._drawer_sensors.values())),
+            DrawerClosedCondition(self._drawer_shapes['bottom'], self._closed_y),
+            DrawerClosedCondition(self._drawer_shapes['middle'], self._closed_y),
+            DrawerClosedCondition(self._drawer_shapes['top'], self._closed_y),
             NothingGrasped(self.robot.gripper),
         ]
         self.register_success_conditions(
             [ConditionSet(self.goal_conditions, order_matters=False)])
 
         return [
-            'put each block in a different drawer and close the drawers',
+            'put each of the three blocks in a different drawer and close the drawers',
             'store the three blocks in three separate drawers',
             'place the blocks in different drawers and close each one',
         ]
@@ -396,7 +492,17 @@ class BlocksInDrawersHard(Task):
         wp.set_orientation(orientation)
 
     def step(self) -> None:
-        pass
+        if _BID_DEBUG and os.environ.get('BID_DEBUG_STEP', '0') not in ('0', '', 'false', 'False'):
+            try:
+                bp = [self._block1.get_position(),
+                      self._block2.get_position(),
+                      self._block3.get_position()]
+                _bid_log(f'STEP blocks: '
+                         f'b1=[{bp[0][0]:.3f},{bp[0][1]:.3f},{bp[0][2]:.3f}] '
+                         f'b2=[{bp[1][0]:.3f},{bp[1][1]:.3f},{bp[1][2]:.3f}] '
+                         f'b3=[{bp[2][0]:.3f},{bp[2][1]:.3f},{bp[2][2]:.3f}]')
+            except Exception:
+                pass
 
     def variation_count(self) -> int:
         return len(VARIATIONS)

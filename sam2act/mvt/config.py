@@ -63,6 +63,19 @@ _C.sam2_ckpt = './mvt/sam2_train/checkpoints/sam2.1_hiera_base_plus.pt'
 _C.use_step_embedding = False
 _C.step_embedding_freq_size = 32
 _C.step_embedding_max_period = 100
+# Under Stage 2 (use_memory=True), mvt1's non-SAM2 params are frozen by default.
+# When True, step_embedder MLP stays trainable so the proprio-path step signal
+# can be fine-tuned at Stage 2 alongside memory training.
+_C.train_step_embedder = False
+
+# Phase-keyed memory retrieval (Stage 2). Injects the step-embedding signal
+# into the memory attention's positional-encoding channel (K and Q sides)
+# so retrieval scores by phase proximity in addition to visual similarity.
+# No-op when use_phase_keyed_memory is False.
+_C.use_phase_keyed_memory = False
+_C.phase_key_injection = "both"       # one of: "both" | "write" | "read"
+_C.phase_key_alpha = 1.0              # float scalar; initial value when learnable
+_C.phase_key_alpha_learnable = False  # when True, alpha becomes an nn.Parameter
 
 def get_cfg_defaults():
     """Get a yacs CfgNode object with default values for my_project."""

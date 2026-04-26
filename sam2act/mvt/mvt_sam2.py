@@ -96,6 +96,11 @@ class MVT_SAM2(nn.Module):
         use_step_embedding=False,
         step_embedding_freq_size=32,
         step_embedding_max_period=100,
+        train_step_embedder=False,
+        use_phase_keyed_memory=False,
+        phase_key_injection="both",
+        phase_key_alpha=1.0,
+        phase_key_alpha_learnable=False,
         renderer_device="cuda:0",
     ):
         """MultiView Transfomer
@@ -139,6 +144,12 @@ class MVT_SAM2(nn.Module):
         self.st_wpt_loc_aug = st_wpt_loc_aug
         self.st_wpt_loc_inp_no_noise = st_wpt_loc_inp_no_noise
         self.img_aug_2 = img_aug_2
+        # Needed by the freeze filter below (see use_memory branches) to keep
+        # phase-keying parameters trainable under Stage 2 memory training.
+        self.use_phase_keyed_memory = use_phase_keyed_memory
+        # When True, step_embedder MLP stays trainable under Stage 2. Logged
+        # so #48 (frozen) vs #49 (unfrozen) baselines are distinguishable.
+        self.train_step_embedder = train_step_embedder
 
         # for verifying the input
         self.feat_ver = feat_ver
@@ -215,18 +226,48 @@ class MVT_SAM2(nn.Module):
 
             if self.use_memory:
                 for name, param in self.mvt1.named_parameters():
-                    if "sam" not in name and "up0" not in name:
+                    # Phase-keyed memory params (phase_to/phase_key) stay
+                    # trainable only when phase-keyed memory is enabled.
+                    # step_embedder trainability is governed by the separate
+                    # train_step_embedder flag so its behavior can be set
+                    # independently of phase-keyed memory.
+                    trainable = (
+                        "sam" in name
+                        or "up0" in name
+                        or (
+                            self.use_phase_keyed_memory
+                            and ("phase_to" in name or "phase_key" in name)
+                        )
+                        or (
+                            self.train_step_embedder
+                            and (
+                                "step_embedder" in name
+                                or "step_embedding_alpha" in name
+                            )
+                        )
+                    )
+                    if not trainable:
                         param.requires_grad = False
 
         if self.stage_two:
             if self.ifSAM2:
+                # Memory (SAM2 module) lives in mvt1 only; mvt2 does coarse→fine
+                # refinement without memory. Disable phase-keyed memory on mvt2
+                # so its forward() doesn't require step_idx (which is mvt1-only
+                # by design — see comment in forward() where only mvt1 receives
+                # step_idx).
+                mvt2_args = dict(args)
+                mvt2_args["use_phase_keyed_memory"] = False
                 self.mvt2 = MVT_SAM2_Single(
-                    **args,
+                    **mvt2_args,
                     renderer=self.renderer,
                     sam2=self.sam2,
                 )
-                
+
                 if self.use_memory:
+                    # mvt2 has no phase-keyed memory (disabled above). Preserve
+                    # the original freeze policy: only SAM2 backbone params are
+                    # trainable in mvt2 under Stage 2 memory training.
                     for name, param in self.mvt2.named_parameters():
                         if "sam" not in name:
                             param.requires_grad = False
