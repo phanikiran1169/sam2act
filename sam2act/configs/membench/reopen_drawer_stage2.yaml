@@ -1,5 +1,5 @@
 # reopen_drawer_stage2.yaml: MemoryBench Stage 2 config for reopen_drawer.
-# reopen_drawer_stage2.yaml: Source — run #5 (92% vs paper's 84%).
+# reopen_drawer_stage2.yaml: Step embedding ON, frozen during Stage 2.
 
 # Task
 task: reopen_drawer
@@ -22,7 +22,7 @@ sample_distribution_mode: demo_uniform_temporal
 # Scripts
 train_script: train_plus.py
 exp_cfg: configs/sam2act_plus.yaml
-mvt_cfg: mvt/configs/sam2act_plus.yaml
+mvt_cfg: mvt/configs/sam2act_plus_step_emb.yaml
 
 # Seed (for reproducibility)
 seed: 42
