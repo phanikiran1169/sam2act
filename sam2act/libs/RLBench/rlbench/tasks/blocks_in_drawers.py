@@ -94,7 +94,7 @@ GRIPPER_ABOVE = [-3.1416, 0.0, 1.5708]
 # Scene geometry — measured from blocks_in_drawers.ttm via inspect_scene.py.
 # Drawer slides along -Y: closed handle at Y=+0.096, open handle at Y=-0.114.
 DRAWER_TRAVEL = -0.21            # closed -> open, in -Y
-HANDLE_APPROACH_DY = -0.042      # pre-approach offset from closed handle
+HANDLE_APPROACH_DY = -0.10       # pre-approach offset from closed handle
 
 # Joint motor force used to hold inactive drawers against arm-brush drift.
 # Enabled in init_task. Empirically, set_joint_interval pinning is enough
