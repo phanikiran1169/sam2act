@@ -2,6 +2,7 @@
 # inspect_and_pick.py: button, then retrieve a target block into a bin. v0.
 
 import os
+from itertools import permutations
 from typing import List
 
 import numpy as np
@@ -582,11 +583,12 @@ class InspectAndPick(Task):
 
         # --- color-to-drawer permutation ------------------------------
         # Each drawer holds a distinct R/G/B block; the assignment is
-        # uniform over the 6 permutations of {red,green,blue} ->
-        # {top,middle,bottom}. Target color is fixed (red); the drawer
+        # one of the 6 permutations of {red,green,blue} ->
+        # {top,middle,bottom}, selected deterministically by the
+        # variation index. Target color is fixed (red); the drawer
         # holding red is what the model must recall.
-        colors = list(TARGET_COLORS.keys())
-        np.random.shuffle(colors)
+        all_perms = list(permutations(['red', 'green', 'blue']))
+        colors = list(all_perms[index])
         self._color_to_drawer = dict(zip(colors, DRAWER_NAMES))
         for color_name, dname in self._color_to_drawer.items():
             self._blocks[dname].set_color(TARGET_COLORS[color_name])
@@ -641,8 +643,8 @@ class InspectAndPick(Task):
             [ConditionSet(self.goal_conditions, order_matters=False)])
 
         return [
-            f'inspect each drawer, press the button, '
-            f'then pick the {color_name} block and put it in the bin'
+            'inspect each drawer, press the button, '
+            'then pick the red block and put it in the box'
         ]
 
     # -- phase specs ---------------------------------------------------
@@ -827,7 +829,7 @@ class InspectAndPick(Task):
                 pass
 
     def variation_count(self) -> int:
-        return 1
+        return 6
 
     def is_static_workspace(self) -> bool:
         return True
