@@ -24,6 +24,7 @@ from pyrep.objects.object import Object
 _TASK_CAM_PLACEHOLDER = {
     'blocks_in_drawers': 'cam_cinematic_placeholder_bid',
     'blocks_in_drawers_hard': 'cam_cinematic_placeholder_bid',
+    'inspect_and_pick': 'cam_cinematic_placeholder_bid',
 }
 
 
