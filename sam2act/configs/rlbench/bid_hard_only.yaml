@@ -1,0 +1,29 @@
+# bid_hard_only.yaml: Stage 0 config for blocks_in_drawers_hard only (1 task).
+# bid_hard_only.yaml: Mirrors bid_only.yaml hyperparameters.
+
+# Tasks
+tasks: blocks_in_drawers_hard
+exp_name: bid_hard_only
+
+# Training hyperparameters
+bs: 32                   # per-GPU batch size (total BS = 64 with 2 GPUs)
+epochs: 90
+base_lr: 1.25e-5         # LR scaling rule: effective_lr = base_lr × bs × gpus
+steps_per_epoch: 625
+warmup_steps: 2000
+
+# Model config
+use_memory: false
+num_maskmem: 9
+
+# Data
+demo: 100
+sample_distribution_mode: task_uniform
+
+# Scripts
+train_script: train.py
+exp_cfg: configs/sam2act.yaml
+mvt_cfg: mvt/configs/sam2act_step_emb.yaml
+
+# Seed (for reproducibility)
+seed: 42
