@@ -643,8 +643,10 @@ class InspectAndPick(Task):
             [ConditionSet(self.goal_conditions, order_matters=False)])
 
         return [
-            'inspect each drawer, press the button, '
-            'then pick the red block and put it in the box'
+            'Open the three drawers one at a time, observe the block in '
+            'each drawer, and close it after observing. After observing all '
+            'three drawers, press the button. Then open the drawer with the '
+            'red block, pick it, and place it in the box'
         ]
 
     # -- phase specs ---------------------------------------------------
