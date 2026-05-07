@@ -90,10 +90,9 @@ VARIATIONS = list(permutations(DRAWER_NAMES, 3))  # 6 ordered triples
 GRIPPER_HANDLE = [-1.5705, 0.0, -3.1412]
 GRIPPER_ABOVE = [-3.1416, 0.0, 1.5708]
 
-# Scene geometry (inherited from blocks_in_drawers.ttm; the _hard .ttm is a
-# direct copy, so the same constants apply). Drawer slides along -Y.
+# Scene geometry. Drawer slides along -Y.
 DRAWER_TRAVEL = -0.21
-HANDLE_APPROACH_DY = -0.042
+HANDLE_APPROACH_DY = -0.10
 
 # Joint motor force used to hold inactive drawers against arm-brush drift.
 # See blocks_in_drawers.py for tuning rationale. Set to 0 disables motor
@@ -364,6 +363,29 @@ class BlocksInDrawersHard(Task):
         waypoint._linear_only = True
         waypoint._ignore_collisions = True
 
+    def _make_realign_pick(self, block, transit_idx, approach_idx,
+                           pre_grasp_idx, grasp_idx):
+        """Start-of-path callback at the pick transit. Re-reads live
+        block pose right before grasp and rewrites the four pick
+        waypoints. Handles drift from prior phases nudging the block.
+        """
+        def _fn(waypoint):
+            waypoint._ignore_collisions = True
+            bx, by, bz = block.get_position()
+            transit_wp = Dummy(f'waypoint{transit_idx}')
+            approach_wp = Dummy(f'waypoint{approach_idx}')
+            pre_grasp_wp = Dummy(f'waypoint{pre_grasp_idx}')
+            grasp_wp = Dummy(f'waypoint{grasp_idx}')
+            transit_wp.set_position([bx, by, Z_TRANSIT])
+            transit_wp.set_orientation(GRIPPER_ABOVE)
+            approach_wp.set_position([bx, by, Z_BLOCK_APPROACH])
+            approach_wp.set_orientation(GRIPPER_ABOVE)
+            pre_grasp_wp.set_position([bx, by, bz])
+            pre_grasp_wp.set_orientation(GRIPPER_ABOVE)
+            grasp_wp.set_position([bx, by, bz])
+            grasp_wp.set_orientation(GRIPPER_ABOVE)
+        return _fn
+
     # -- episode setup -------------------------------------------------------
 
     def init_episode(self, index: int) -> List[str]:
@@ -413,6 +435,18 @@ class BlocksInDrawersHard(Task):
             self._wp(idx, pos[0], pos[1], pos[2], ori)
             print(f'  wp{idx:2d}: pos=[{pos[0]:.3f}, {pos[1]:.3f}, '
                   f'{pos[2]:.3f}] ori={[round(o,3) for o in ori]}')
+
+        # Re-read live block pose right before grasp, in case prior
+        # phases nudged the block while the arm transited.
+        for base_idx, blk in ((0, self._block1), (15, self._block2),
+                              (30, self._block3)):
+            self.register_waypoint_ability_start(
+                base_idx + 3,
+                self._make_realign_pick(blk,
+                                        transit_idx=base_idx + 3,
+                                        approach_idx=base_idx + 4,
+                                        pre_grasp_idx=base_idx + 5,
+                                        grasp_idx=base_idx + 6))
 
         # Success: each block in some drawer, all three in DIFFERENT
         # drawers (permutation-invariant; d1/d2/d3 are demo-gen scaffolding
