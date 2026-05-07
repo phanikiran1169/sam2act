@@ -43,6 +43,9 @@ flags.DEFINE_bool('all_variations', True,
 flags.DEFINE_integer('max_attempts_per_episode', 3,
                      'Maximum outer attempts for collecting one episode '
                      'before recording a failure and continuing.')
+flags.DEFINE_string('allowed_variations', '',
+                    'Comma-separated variation IDs to sample from (e.g. '
+                    '"0,2,3"). Empty = sample from all available variations.')
 
 
 def check_and_make(dir):
@@ -369,22 +372,22 @@ def run_all_variations(i, lock, task_index, variation_count, results, file_lock,
         episodes_path = os.path.join(variation_path, EPISODES_FOLDER)
         check_and_make(episodes_path)
 
-        # Stratified plan: distribute episodes_per_task evenly across
-        # variations. Remainder spills onto the lowest variation IDs.
-        # Order is round-robin so per-variation work is interleaved.
-        per_var = FLAGS.episodes_per_task // possible_variations
-        remainder = FLAGS.episodes_per_task % possible_variations
-        plan = []
-        per_var_remaining = [per_var + (1 if v < remainder else 0)
-                             for v in range(possible_variations)]
-        while sum(per_var_remaining) > 0:
-            for v in range(possible_variations):
-                if per_var_remaining[v] > 0:
-                    plan.append(v)
-                    per_var_remaining[v] -= 1
+        # Sample variations randomly per episode. If --allowed_variations is
+        # set, restrict the pool to that subset; otherwise use all available
+        # variations. Distribution skew (if any) emerges from physics-driven
+        # success/failure of attempts rather than from stratification.
+        if FLAGS.allowed_variations:
+            variation_pool = [int(v) for v in FLAGS.allowed_variations.split(',') if v.strip()]
+            for v in variation_pool:
+                if v < 0 or v >= possible_variations:
+                    raise ValueError(
+                        f'allowed_variations contains out-of-range id {v}; '
+                        f'task {t.__name__} has {possible_variations} variations')
+        else:
+            variation_pool = list(range(possible_variations))
 
         for ex_idx in range(FLAGS.episodes_per_task):
-            variation = plan[ex_idx]
+            variation = int(np.random.choice(variation_pool))
             attempts = FLAGS.max_attempts_per_episode
             while attempts > 0:
                 try:
