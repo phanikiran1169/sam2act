@@ -40,6 +40,9 @@ flags.DEFINE_integer('variations', -1,
                      'Number of variations to collect per task. -1 for all.')
 flags.DEFINE_bool('all_variations', True,
                   'Include all variations when sampling epsiodes')
+flags.DEFINE_integer('max_attempts_per_episode', 3,
+                     'Maximum outer attempts for collecting one episode '
+                     'before recording a failure and continuing.')
 
 
 def check_and_make(dir):
@@ -366,12 +369,25 @@ def run_all_variations(i, lock, task_index, variation_count, results, file_lock,
         episodes_path = os.path.join(variation_path, EPISODES_FOLDER)
         check_and_make(episodes_path)
 
-        abort_variation = False
+        # Stratified plan: distribute episodes_per_task evenly across
+        # variations. Remainder spills onto the lowest variation IDs.
+        # Order is round-robin so per-variation work is interleaved.
+        per_var = FLAGS.episodes_per_task // possible_variations
+        remainder = FLAGS.episodes_per_task % possible_variations
+        plan = []
+        per_var_remaining = [per_var + (1 if v < remainder else 0)
+                             for v in range(possible_variations)]
+        while sum(per_var_remaining) > 0:
+            for v in range(possible_variations):
+                if per_var_remaining[v] > 0:
+                    plan.append(v)
+                    per_var_remaining[v] -= 1
+
         for ex_idx in range(FLAGS.episodes_per_task):
-            attempts = 10
+            variation = plan[ex_idx]
+            attempts = FLAGS.max_attempts_per_episode
             while attempts > 0:
                 try:
-                    variation = np.random.randint(possible_variations)
                     task_env = rlbench_env.get_task(t)
                     task_env.set_variation(variation)
                     descriptions, obs = task_env.reset()
@@ -389,13 +405,13 @@ def run_all_variations(i, lock, task_index, variation_count, results, file_lock,
                         continue
                     problem = (
                         'Process %d failed collecting task %s (variation: %d, '
-                        'example: %d). Skipping this task/variation.\n%s\n' % (
+                        'example: %d) after all attempts. Skipping this episode '
+                        'and continuing.\n%s\n' % (
                             i, task_env.get_name(), variation, ex_idx,
                             str(e))
                     )
                     print(problem)
                     tasks_with_problems += problem
-                    abort_variation = True
                     break
                 episode_path = os.path.join(episodes_path, EPISODE_FOLDER % ex_idx)
                 with file_lock:
@@ -405,8 +421,7 @@ def run_all_variations(i, lock, task_index, variation_count, results, file_lock,
                             episode_path, VARIATION_DESCRIPTIONS), 'wb') as f:
                         pickle.dump(descriptions, f)
                 break
-            if abort_variation:
-                break
+            # On final failure for this episode, continue with the next planned episode.
 
         # with lock:
         task_index.value += 1
