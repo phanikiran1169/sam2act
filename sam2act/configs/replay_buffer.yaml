@@ -11,3 +11,9 @@ tasks:
   stack_and_swap: 20
   # blocks_in_drawers: 30 waypoints, 100 demos. N=20 matches sas.
   blocks_in_drawers: 20
+  # blocks_in_drawers_hard: 3-block variant, ~40+ waypoints, 100 demos. N=20 matches bid.
+  blocks_in_drawers_hard: 20
+  # inspect_and_pick: 46 waypoints, 100 demos. N=20 matches bid_hard.
+  inspect_and_pick: 20
+  # blocks_in_two_cabinets: 75 waypoints, 100 demos. N=20 matches other membench tasks.
+  blocks_in_two_cabinets: 20

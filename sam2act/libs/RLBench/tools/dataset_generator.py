@@ -40,6 +40,12 @@ flags.DEFINE_integer('variations', -1,
                      'Number of variations to collect per task. -1 for all.')
 flags.DEFINE_bool('all_variations', True,
                   'Include all variations when sampling epsiodes')
+flags.DEFINE_integer('max_attempts_per_episode', 3,
+                     'Maximum outer attempts for collecting one episode '
+                     'before recording a failure and continuing.')
+flags.DEFINE_string('allowed_variations', '',
+                    'Comma-separated variation IDs to sample from (e.g. '
+                    '"0,2,3"). Empty = sample from all available variations.')
 
 
 def check_and_make(dir):
@@ -366,12 +372,25 @@ def run_all_variations(i, lock, task_index, variation_count, results, file_lock,
         episodes_path = os.path.join(variation_path, EPISODES_FOLDER)
         check_and_make(episodes_path)
 
-        abort_variation = False
+        # Sample variations randomly per episode. If --allowed_variations is
+        # set, restrict the pool to that subset; otherwise use all available
+        # variations. Distribution skew (if any) emerges from physics-driven
+        # success/failure of attempts rather than from stratification.
+        if FLAGS.allowed_variations:
+            variation_pool = [int(v) for v in FLAGS.allowed_variations.split(',') if v.strip()]
+            for v in variation_pool:
+                if v < 0 or v >= possible_variations:
+                    raise ValueError(
+                        f'allowed_variations contains out-of-range id {v}; '
+                        f'task {t.__name__} has {possible_variations} variations')
+        else:
+            variation_pool = list(range(possible_variations))
+
         for ex_idx in range(FLAGS.episodes_per_task):
-            attempts = 10
+            variation = int(np.random.choice(variation_pool))
+            attempts = FLAGS.max_attempts_per_episode
             while attempts > 0:
                 try:
-                    variation = np.random.randint(possible_variations)
                     task_env = rlbench_env.get_task(t)
                     task_env.set_variation(variation)
                     descriptions, obs = task_env.reset()
@@ -389,13 +408,13 @@ def run_all_variations(i, lock, task_index, variation_count, results, file_lock,
                         continue
                     problem = (
                         'Process %d failed collecting task %s (variation: %d, '
-                        'example: %d). Skipping this task/variation.\n%s\n' % (
+                        'example: %d) after all attempts. Skipping this episode '
+                        'and continuing.\n%s\n' % (
                             i, task_env.get_name(), variation, ex_idx,
                             str(e))
                     )
                     print(problem)
                     tasks_with_problems += problem
-                    abort_variation = True
                     break
                 episode_path = os.path.join(episodes_path, EPISODE_FOLDER % ex_idx)
                 with file_lock:
@@ -405,8 +424,7 @@ def run_all_variations(i, lock, task_index, variation_count, results, file_lock,
                             episode_path, VARIATION_DESCRIPTIONS), 'wb') as f:
                         pickle.dump(descriptions, f)
                 break
-            if abort_variation:
-                break
+            # On final failure for this episode, continue with the next planned episode.
 
         # with lock:
         task_index.value += 1

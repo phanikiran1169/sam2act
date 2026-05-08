@@ -2,7 +2,12 @@
 #
 # Licensed under the NVIDIA Source Code License [see LICENSE for details].
 
-from sam2act.libs.peract.helpers.custom_rlbench_env import CustomMultiTaskRLBenchEnv
+from sam2act.libs.peract.helpers.custom_rlbench_env import (
+    CustomMultiTaskRLBenchEnv,
+    _resolve_cam_placeholder,
+    _pose_record_cam,
+)
+from yarr.utils.process_str import change_case
 
 
 class CustomMultiTaskRLBenchEnv2(CustomMultiTaskRLBenchEnv):
@@ -33,6 +38,13 @@ class CustomMultiTaskRLBenchEnv2(CustomMultiTaskRLBenchEnv):
         self._task.set_variation(d.variation_number)
         desc, obs = self._task.reset_to_demo(d)
         self._lang_goal = desc[0]
+
+        # Re-pose the eval recording camera for the active task. Task swaps
+        # change which cinematic placeholder applies; without this the camera
+        # stays stuck on whichever placeholder was chosen at launch.
+        if self.eval and self._record_cam is not None:
+            task_name = change_case(self._task._task.__class__.__name__)
+            _pose_record_cam(self._record_cam, task_name)
 
         self._previous_obs_dict = self.extract_obs(obs)
         self._record_current_episode = (

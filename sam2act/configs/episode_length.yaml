@@ -12,3 +12,7 @@ tasks:
   blocks_in_drawers: 35
   # blocks_in_drawers_hard: 45 waypoints in task (3-block, 3-drawer). 50 adds margin.
   blocks_in_drawers_hard: 50
+  # inspect_and_pick: 46 waypoints in task. 50 adds margin.
+  inspect_and_pick: 50
+  # blocks_in_two_cabinets: 75 waypoints (5 blocks x 15 wp/phase). 80 adds margin.
+  blocks_in_two_cabinets: 80

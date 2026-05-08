@@ -192,6 +192,40 @@ def get_dataset_temporal(
     if missing:
         raise ValueError(f"demo_aug_every_n_per_task missing tasks: {missing}")
 
+    # Size replay capacity from on-disk transitions per task to avoid silent
+    # circular-overwrite truncation when total transitions exceed the default
+    # cap (3e5). Bookkeeping arrays scale linearly with capacity but stay
+    # small with disk_saving=True (~17 MB per million slots).
+    def _count_replay_files(storage_dir, task_list):
+        total = 0
+        per_task = {}
+        for t in task_list:
+            d = os.path.join(storage_dir, t)
+            if os.path.isdir(d):
+                n = sum(1 for f in os.listdir(d) if f.endswith(".replay"))
+            else:
+                n = 0
+            per_task[t] = n
+            total += n
+        return total, per_task
+
+    train_total, train_per_task = _count_replay_files(TRAIN_REPLAY_STORAGE_DIR, tasks)
+    test_total = 0
+    if not only_train:
+        test_total, _ = _count_replay_files(TEST_REPLAY_STORAGE_DIR, tasks)
+
+    # 1.5x margin so the buffer never wraps; floor at 3e5 (legacy default) so
+    # small runs are unaffected.
+    train_replay_size = max(int(3e5), int(max(train_total, 1) * 1.5))
+    test_replay_size = max(int(3e5), int(max(test_total, 1) * 1.5))
+    if rank == 0:
+        print(f"[replay-buffer] train tasks={len(tasks)} "
+              f"transitions={train_total} capacity={train_replay_size} "
+              f"per_task={train_per_task}", flush=True)
+        if not only_train:
+            print(f"[replay-buffer] test transitions={test_total} "
+                  f"capacity={test_replay_size}", flush=True)
+
     train_replay_buffer = create_replay_temporal(
         batch_size=BATCH_SIZE_TRAIN,
         timesteps=1,
@@ -199,6 +233,7 @@ def get_dataset_temporal(
         cameras=CAMERAS,
         voxel_sizes=VOXEL_SIZES,
         num_maskmem=num_maskmem,
+        replay_size=train_replay_size,
     )
     if not only_train:
         test_replay_buffer = create_replay_temporal(
@@ -208,6 +243,7 @@ def get_dataset_temporal(
             cameras=CAMERAS,
             voxel_sizes=VOXEL_SIZES,
             num_maskmem=num_maskmem,
+            replay_size=test_replay_size,
         )
 
     # load pre-trained language model

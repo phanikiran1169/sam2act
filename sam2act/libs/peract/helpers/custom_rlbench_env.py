@@ -14,6 +14,78 @@ from yarr.utils.process_str import change_case
 from pyrep.const import RenderMode
 from pyrep.errors import IKError, ConfigurationPathError
 from pyrep.objects import VisionSensor, Dummy
+from pyrep.objects.object import Object
+
+
+# Per-task override for the eval-video camera placeholder. Keys are the
+# change_case task name (Panda class -> snake_case). Value is the Dummy name
+# in task_design.ttt to use instead of the default 'cam_cinematic_placeholder'.
+# Missing entries fall back to the default placeholder.
+_TASK_CAM_PLACEHOLDER = {
+    'blocks_in_drawers': 'cam_cinematic_placeholder_bid',
+    'blocks_in_drawers_hard': 'cam_cinematic_placeholder_bid',
+    'inspect_and_pick': 'cam_cinematic_placeholder_bid',
+}
+
+
+def _resolve_cam_placeholder(task_name: str) -> Dummy:
+    name = _TASK_CAM_PLACEHOLDER.get(task_name, 'cam_cinematic_placeholder')
+    if not Object.exists(name):
+        name = 'cam_cinematic_placeholder'
+    return Dummy(name)
+
+
+def _is_custom_cam_placeholder(task_name: str) -> bool:
+    """True if the task has its own placeholder resolved (not the default).
+    Callers use this to skip the default 135° base rotation, which only
+    makes sense for the original 'cam_cinematic_placeholder' pose."""
+    name = _TASK_CAM_PLACEHOLDER.get(task_name)
+    return name is not None and Object.exists(name)
+
+
+def _aim_record_cam_at(record_cam: VisionSensor, cam_pos, target_pos,
+                       up_world=(0.0, 0.0, 1.0)):
+    """Aim the camera's optical axis (+local Z) at target_pos from cam_pos.
+
+    Verified empirically against the default cinematic placeholder: after the
+    135° base rotate, that placeholder's +local Z aligned with the
+    placeholder->base view direction at +0.996 dot. So +Z is the optical axis
+    in this scene's camera convention.
+
+    Builds an orthonormal basis with +Z = (target-cam)/||.||, +X = up x +Z,
+    +Y = +Z x +X, and writes the resulting 4x4 to the vision sensor."""
+    cam_pos = np.asarray(cam_pos, dtype=float)
+    target_pos = np.asarray(target_pos, dtype=float)
+    z_axis = target_pos - cam_pos
+    z_axis /= (np.linalg.norm(z_axis) + 1e-9)
+
+    up = np.asarray(up_world, dtype=float)
+    # Guard: if z_axis is parallel to up, fall back to world +Y as the
+    # secondary reference so cross product stays defined.
+    if abs(np.dot(z_axis, up)) > 0.999:
+        up = np.array([0.0, 1.0, 0.0])
+
+    x_axis = np.cross(up, z_axis)
+    x_axis /= (np.linalg.norm(x_axis) + 1e-9)
+    y_axis = np.cross(z_axis, x_axis)
+
+    M = np.eye(4)
+    M[:3, 0] = x_axis
+    M[:3, 1] = y_axis
+    M[:3, 2] = z_axis
+    M[:3, 3] = cam_pos
+    record_cam.set_matrix(M)
+
+
+def _pose_record_cam(record_cam: VisionSensor, task_name: str):
+    """Apply the placeholder pose and, for custom-placeholder tasks, override
+    the orientation with a look-at aimed at cam_cinematic_base."""
+    cam_placeholder = _resolve_cam_placeholder(task_name)
+    record_cam.set_pose(cam_placeholder.get_pose())
+    if _is_custom_cam_placeholder(task_name) and Object.exists('cam_cinematic_base'):
+        cam_pos = cam_placeholder.get_position()
+        target_pos = Dummy('cam_cinematic_base').get_position()
+        _aim_record_cam_at(record_cam, cam_pos, target_pos)
 
 
 
@@ -94,12 +166,13 @@ class CustomRLBenchEnv(RLBenchEnv):
         super(CustomRLBenchEnv, self).launch()
         self._task._scene.register_step_callback(self._my_callback)
         if self.eval:
-            cam_placeholder = Dummy('cam_cinematic_placeholder')
-            cam_base = Dummy('cam_cinematic_base')
-            cam_base.rotate([0, 0, np.pi * 0.75])
+            task_name = change_case(self._task._task.__class__.__name__)
+            if not _is_custom_cam_placeholder(task_name):
+                cam_base = Dummy('cam_cinematic_base')
+                cam_base.rotate([0, 0, np.pi * 0.75])
             self._record_cam = VisionSensor.create([1920, 1080])
             self._record_cam.set_explicit_handling(True)
-            self._record_cam.set_pose(cam_placeholder.get_pose())
+            _pose_record_cam(self._record_cam, task_name)
             self._record_cam.set_render_mode(RenderMode.OPENGL)
 
     def reset(self) -> dict:
@@ -276,12 +349,13 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         super(CustomMultiTaskRLBenchEnv, self).launch()
         self._task._scene.register_step_callback(self._my_callback)
         if self.eval:
-            cam_placeholder = Dummy('cam_cinematic_placeholder')
-            cam_base = Dummy('cam_cinematic_base')
-            cam_base.rotate([0, 0, np.pi * 0.75])
+            task_name = change_case(self._task._task.__class__.__name__)
+            if not _is_custom_cam_placeholder(task_name):
+                cam_base = Dummy('cam_cinematic_base')
+                cam_base.rotate([0, 0, np.pi * 0.75])
             self._record_cam = VisionSensor.create([1920, 1080])
             self._record_cam.set_explicit_handling(True)
-            self._record_cam.set_pose(cam_placeholder.get_pose())
+            _pose_record_cam(self._record_cam, task_name)
             self._record_cam.set_render_mode(RenderMode.OPENGL)
 
     def reset(self) -> dict:
@@ -381,6 +455,13 @@ class CustomMultiTaskRLBenchEnv(MultiTaskRLBenchEnv):
         self._task.set_variation(d.variation_number)
         _, obs = self._task.reset_to_demo(d)
         self._lang_goal = self._task.get_task_descriptions()[0]
+
+        # Re-pose the recording camera for the active task. Task swaps in
+        # multi-task eval change which placeholder applies; without this the
+        # camera stays stuck on whichever placeholder was chosen at launch.
+        if self.eval and self._record_cam is not None:
+            task_name = change_case(self._task._task.__class__.__name__)
+            _pose_record_cam(self._record_cam, task_name)
 
         self._previous_obs_dict = self.extract_obs(obs)
         self._record_current_episode = (

@@ -101,6 +101,12 @@ class MVT_SAM2(nn.Module):
         phase_key_injection="both",
         phase_key_alpha=1.0,
         phase_key_alpha_learnable=False,
+        use_phase_anchors=False,
+        max_phase_anchors=6,
+        anchor_detect_gripper=True,
+        anchor_detect_step_emb_delta=True,
+        anchor_step_emb_delta_threshold=0.15,
+        anchor_settle_frames=2,
         renderer_device="cuda:0",
     ):
         """MultiView Transfomer
@@ -147,9 +153,9 @@ class MVT_SAM2(nn.Module):
         # Needed by the freeze filter below (see use_memory branches) to keep
         # phase-keying parameters trainable under Stage 2 memory training.
         self.use_phase_keyed_memory = use_phase_keyed_memory
-        # When True, step_embedder MLP stays trainable under Stage 2. Logged
-        # so #48 (frozen) vs #49 (unfrozen) baselines are distinguishable.
+        # When True, step_embedder MLP stays trainable under Stage 2.
         self.train_step_embedder = train_step_embedder
+        self.use_phase_anchors = use_phase_anchors
 
         # for verifying the input
         self.feat_ver = feat_ver
@@ -245,6 +251,7 @@ class MVT_SAM2(nn.Module):
                                 or "step_embedding_alpha" in name
                             )
                         )
+                        or (self.use_phase_anchors and "anchor" in name)
                     )
                     if not trainable:
                         param.requires_grad = False
@@ -269,7 +276,14 @@ class MVT_SAM2(nn.Module):
                     # the original freeze policy: only SAM2 backbone params are
                     # trainable in mvt2 under Stage 2 memory training.
                     for name, param in self.mvt2.named_parameters():
-                        if "sam" not in name:
+                        # mvt2 has phase-keyed memory disabled (see mvt2_args
+                        # above), so only the SAM2 backbone and (optionally)
+                        # the anchor params train under Stage 2 memory training.
+                        trainable = (
+                            "sam" in name
+                            or (self.use_phase_anchors and "anchor" in name)
+                        )
+                        if not trainable:
                             param.requires_grad = False
 
     def get_pt_loc_on_img(self, pt, mvt1_or_mvt2, dyn_cam_info, out=None):
