@@ -15,3 +15,5 @@ tasks:
   blocks_in_drawers_hard: 20
   # inspect_and_pick: 46 waypoints, 100 demos. N=20 matches bid_hard.
   inspect_and_pick: 20
+  # blocks_in_two_cabinets: 75 waypoints, 100 demos. N=20 matches other membench tasks.
+  blocks_in_two_cabinets: 20

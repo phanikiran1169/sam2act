@@ -1,4 +1,4 @@
-# blocks_in_two_cabinets.py: 6-block, 6-drawer (2 cabinets × 3 drawers).
+# blocks_in_two_cabinets.py: 5-block, 5-drawer (2 cabinets, cabinet 2 bottom skipped).
 # blocks_in_two_cabinets.py: Cabinet 1 (near) is filled first, then cabinet 2.
 
 import os
@@ -437,8 +437,8 @@ class BlocksInTwoCabinets(Task):
             [ConditionSet(self.goal_conditions, order_matters=False)])
 
         return [
-            'put each of the six blocks in a different drawer and close the drawers',
-            'store the six blocks in six separate drawers',
+            'put each of the five blocks in a different drawer and close the drawers',
+            'store the five blocks in five separate drawers',
             'place the blocks in different drawers and close each one',
         ]
 
