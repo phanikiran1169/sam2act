@@ -137,6 +137,7 @@ class MVT_SAM2(nn.Module):
         del args["st_wpt_loc_aug"]
         del args["st_wpt_loc_inp_no_noise"]
         del args["img_aug_2"]
+        del args["memory_full_finetune"]
 
         self.rot_ver = rot_ver
         self.num_rot = num_rot
