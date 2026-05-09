@@ -1,0 +1,25 @@
+# Task
+task: blocks_in_two_cabinets
+stage: 1
+
+# Training hyperparameters
+bs: 32
+epochs: 10
+base_lr: 1.25e-5
+steps_per_epoch: 625
+warmup_steps: 2000
+
+# Model config
+use_memory: false
+num_maskmem: 9
+
+# Data
+sample_distribution_mode: task_uniform
+
+# Scripts
+train_script: train.py
+exp_cfg: configs/sam2act.yaml
+mvt_cfg: mvt/configs/sam2act_step_emb.yaml
+
+# Seed
+seed: 42
