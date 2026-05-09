@@ -298,14 +298,14 @@ def print_loss_log(agent):
 def manage_diag_log(agent, tasks, keypoint_idx, per_elem_trans_loss,
                     q_trans, action_trans, rot_q, action_rot_x_oh,
                     action_rot_y_oh, action_rot_z_oh, grip_q, action_grip_oh,
-                    use_memory, num_rot_classes, reset_log=False,
+                    rgc_active, num_rot_classes, reset_log=False,
                     per_elem_total_loss=None):
     """Per-task and per-waypoint training diagnostics from detached tensors.
 
     `per_elem_trans_loss` has shape (bs, nc) — the raw translation CE output.
     `per_elem_total_loss` has shape (bs,) — per-sample sum of all active loss
-    components (trans + rot + grip + collision in Stage 0/1, or trans alone
-    in Stage 2). When None, falls back to the trans loss alone.
+    components. When None, falls back to the trans loss alone.
+    `rgc_active`: True when rot/grip/collision heads + losses are active.
     """
     from collections import defaultdict
     if not hasattr(agent, 'diag_log') or reset_log:
@@ -323,7 +323,7 @@ def manage_diag_log(agent, tasks, keypoint_idx, per_elem_trans_loss,
     elem_pixel = (q_trans.argmax(dim=1) == action_trans.argmax(dim=1)).float().mean(dim=1)
 
     elem_grip = elem_rot = None
-    if not use_memory and grip_q is not None and rot_q is not None:
+    if rgc_active and grip_q is not None and rot_q is not None:
         elem_grip = (grip_q.argmax(-1) == action_grip_oh.argmax(-1)).float()
         nrc = num_rot_classes
         elem_rot = (
@@ -355,8 +355,8 @@ def get_diag_summary(agent, window=200):
     """Rolling window per-task diagnostics with convergence detection.
 
     Emits `{task}/trans_loss` (translation CE only) and `{task}/total_loss`
-    (sum of all active loss components). In Stage 2 these are equal because
-    rot/grip/collision heads are frozen.
+    (sum of all active loss components). These are equal when rot/grip/collision
+    losses are not in use.
 
     The convergence detector tracks `{task}/total_loss` since that is the
     quantity being optimized.
@@ -462,6 +462,7 @@ class SAM2Act_Agent:
         use_memory: bool = False,
         num_maskmem: int = 7,
         gradient_accumulation_steps: int = 1,
+        memory_full_finetune: bool = False,
     ):
         """
         :param gt_hm_sigma: the std of the groundtruth hm, currently for for
@@ -526,6 +527,9 @@ class SAM2Act_Agent:
         self.use_memory = use_memory
         self._num_maskmem = num_maskmem
         self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.memory_full_finetune = memory_full_finetune
+        # True when rot/grip/collision heads + losses are active.
+        self._rgc_active = (not self.use_memory) or self.memory_full_finetune
 
         # Agent-side keypoint counter used by the learnable step embedding.
         # Reset to 0 on every rollout via reset(); incremented in act() when
@@ -683,7 +687,7 @@ class SAM2Act_Agent:
 
             # if two stages, we concatenate the q_trans, and replace all other
             # q
-            if self.stage_two and not self.use_memory:
+            if self.stage_two and self._rgc_active:
                 out = out["mvt2"]
                 q_trans2 = out["trans"].view(bs, nc, h * w).transpose(1, 2)
                 if not only_pred:
@@ -695,7 +699,7 @@ class SAM2Act_Agent:
             if self.stage_two:
                 out = out["mvt2"]
 
-        if not self.use_memory:
+        if self._rgc_active:
 
             if self.rot_ver == 0:
                 # (bs, 218)
@@ -922,7 +926,7 @@ class SAM2Act_Agent:
                 rot_loss_x = rot_loss_y = rot_loss_z = 0.0
                 grip_loss = 0.0
                 collision_loss = 0.0
-                if not self.use_memory and self.add_rgc_loss:
+                if self._rgc_active and self.add_rgc_loss:
                     nrc = self._num_rotation_classes
                     rot_x_per_sample = self._cross_entropy_loss(
                         rot_q[:, 0*nrc:1*nrc], action_rot_x_one_hot.argmax(-1))
@@ -949,11 +953,11 @@ class SAM2Act_Agent:
                 loss_log = {
                     "total_loss": total_loss.item(),
                     "trans_loss": trans_loss.item(),
-                    "rot_loss_x": rot_loss_x.item() if not self.use_memory else None,
-                    "rot_loss_y": rot_loss_y.item() if not self.use_memory else None,
-                    "rot_loss_z": rot_loss_z.item() if not self.use_memory else None,
-                    "grip_loss": grip_loss.item() if not self.use_memory else None,
-                    "collision_loss": collision_loss.item() if not self.use_memory else None,
+                    "rot_loss_x": rot_loss_x.item() if self._rgc_active else None,
+                    "rot_loss_y": rot_loss_y.item() if self._rgc_active else None,
+                    "rot_loss_z": rot_loss_z.item() if self._rgc_active else None,
+                    "grip_loss": grip_loss.item() if self._rgc_active else None,
+                    "collision_loss": collision_loss.item() if self._rgc_active else None,
                     "lr": self._optimizer.param_groups[0]["lr"],
                 }
                 manage_loss_log(self, loss_log, reset_log=reset_log)
@@ -965,13 +969,13 @@ class SAM2Act_Agent:
                         agent=self, tasks=tasks, keypoint_idx=kp_idx,
                         per_elem_trans_loss=trans_loss_per_elem.detach(),
                         q_trans=q_trans.detach(), action_trans=action_trans.detach(),
-                        rot_q=rot_q.detach() if not self.use_memory else None,
-                        action_rot_x_oh=action_rot_x_one_hot if not self.use_memory else None,
-                        action_rot_y_oh=action_rot_y_one_hot if not self.use_memory else None,
-                        action_rot_z_oh=action_rot_z_one_hot if not self.use_memory else None,
-                        grip_q=grip_q.detach() if not self.use_memory else None,
-                        action_grip_oh=action_grip_one_hot if not self.use_memory else None,
-                        use_memory=self.use_memory,
+                        rot_q=rot_q.detach() if self._rgc_active else None,
+                        action_rot_x_oh=action_rot_x_one_hot if self._rgc_active else None,
+                        action_rot_y_oh=action_rot_y_one_hot if self._rgc_active else None,
+                        action_rot_z_oh=action_rot_z_one_hot if self._rgc_active else None,
+                        grip_q=grip_q.detach() if self._rgc_active else None,
+                        action_grip_oh=action_grip_one_hot if self._rgc_active else None,
+                        rgc_active=self._rgc_active,
                         num_rot_classes=self._num_rotation_classes,
                         reset_log=reset_log,
                         per_elem_total_loss=total_per_sample.detach(),
@@ -988,7 +992,7 @@ class SAM2Act_Agent:
                 rot_loss_x = rot_loss_y = rot_loss_z = 0.0
                 grip_loss = 0.0
                 collision_loss = 0.0
-                if not self.use_memory:
+                if self._rgc_active:
                     if self.add_rgc_loss:
                         rot_x_per_sample = self._cross_entropy_loss(
                             rot_q[
@@ -1078,11 +1082,11 @@ class SAM2Act_Agent:
             loss_log = {
                 "total_loss": total_loss_for_log,
                 "trans_loss": trans_loss.item(),
-                "rot_loss_x": rot_loss_x.item() if not self.use_memory else None,
-                "rot_loss_y": rot_loss_y.item() if not self.use_memory else None,
-                "rot_loss_z": rot_loss_z.item() if not self.use_memory else None,
-                "grip_loss": grip_loss.item() if not self.use_memory else None,
-                "collision_loss": collision_loss.item() if not self.use_memory else None,
+                "rot_loss_x": rot_loss_x.item() if self._rgc_active else None,
+                "rot_loss_y": rot_loss_y.item() if self._rgc_active else None,
+                "rot_loss_z": rot_loss_z.item() if self._rgc_active else None,
+                "grip_loss": grip_loss.item() if self._rgc_active else None,
+                "collision_loss": collision_loss.item() if self._rgc_active else None,
                 "lr": self._optimizer.param_groups[0]["lr"],
             }
             manage_loss_log(self, loss_log, reset_log=reset_log)
@@ -1094,13 +1098,13 @@ class SAM2Act_Agent:
                     agent=self, tasks=tasks, keypoint_idx=kp_idx,
                     per_elem_trans_loss=trans_loss_per_elem.detach(),
                     q_trans=q_trans.detach(), action_trans=action_trans.detach(),
-                    rot_q=rot_q.detach() if not self.use_memory else None,
-                    action_rot_x_oh=action_rot_x_one_hot if not self.use_memory else None,
-                    action_rot_y_oh=action_rot_y_one_hot if not self.use_memory else None,
-                    action_rot_z_oh=action_rot_z_one_hot if not self.use_memory else None,
-                    grip_q=grip_q.detach() if not self.use_memory else None,
-                    action_grip_oh=action_grip_one_hot if not self.use_memory else None,
-                    use_memory=self.use_memory,
+                    rot_q=rot_q.detach() if self._rgc_active else None,
+                    action_rot_x_oh=action_rot_x_one_hot if self._rgc_active else None,
+                    action_rot_y_oh=action_rot_y_one_hot if self._rgc_active else None,
+                    action_rot_z_oh=action_rot_z_one_hot if self._rgc_active else None,
+                    grip_q=grip_q.detach() if self._rgc_active else None,
+                    action_grip_oh=action_grip_one_hot if self._rgc_active else None,
+                    rgc_active=self._rgc_active,
                     num_rot_classes=self._num_rotation_classes,
                     reset_log=reset_log,
                     per_elem_total_loss=total_per_sample,
@@ -1311,7 +1315,7 @@ class SAM2Act_Agent:
             out=None
         )
         assert wpt_img.shape[1] == 1
-        if self.stage_two and not self.use_memory:
+        if self.stage_two and self._rgc_active:
             wpt_img2 = self._net_mod.get_pt_loc_on_img(
                 wpt_local.unsqueeze(1),
                 mvt1_or_mvt2=False,

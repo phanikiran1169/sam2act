@@ -101,6 +101,7 @@ class MVT_SAM2(nn.Module):
         phase_key_injection="both",
         phase_key_alpha=1.0,
         phase_key_alpha_learnable=False,
+        memory_full_finetune=False,
         renderer_device="cuda:0",
     ):
         """MultiView Transfomer
@@ -150,6 +151,7 @@ class MVT_SAM2(nn.Module):
         # When True, step_embedder MLP stays trainable under Stage 2. Logged
         # so #48 (frozen) vs #49 (unfrozen) baselines are distinguishable.
         self.train_step_embedder = train_step_embedder
+        self.memory_full_finetune = memory_full_finetune
 
         # for verifying the input
         self.feat_ver = feat_ver
@@ -224,7 +226,7 @@ class MVT_SAM2(nn.Module):
                 sam2=self.sam2,
             )
 
-            if self.use_memory:
+            if self.use_memory and not self.memory_full_finetune:
                 for name, param in self.mvt1.named_parameters():
                     # Phase-keyed memory params (phase_to/phase_key) stay
                     # trainable only when phase-keyed memory is enabled.
@@ -264,7 +266,7 @@ class MVT_SAM2(nn.Module):
                     sam2=self.sam2,
                 )
 
-                if self.use_memory:
+                if self.use_memory and not self.memory_full_finetune:
                     # mvt2 has no phase-keyed memory (disabled above). Preserve
                     # the original freeze policy: only SAM2 backbone params are
                     # trainable in mvt2 under Stage 2 memory training.
@@ -546,7 +548,7 @@ class MVT_SAM2(nn.Module):
             **kwargs,
         )
 
-        if self.stage_two and (not self.use_memory or not self.training):
+        if self.stage_two and (not self.use_memory or self.memory_full_finetune or not self.training):
             with torch.no_grad():
                 # adding then noisy location for training
                 if self.training:

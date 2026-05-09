@@ -310,6 +310,7 @@ def experiment(cmd_args, devices, rank, node_rank, world_size):
             gradient_accumulation_steps=exp_cfg.gradient_accumulation_steps,
             use_memory=mvt_cfg.use_memory,
             num_maskmem=mvt_cfg.num_maskmem,
+            memory_full_finetune=mvt_cfg.memory_full_finetune,
             **exp_cfg.peract,
             **exp_cfg.rvt,
         )

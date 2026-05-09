@@ -77,6 +77,11 @@ _C.phase_key_injection = "both"       # one of: "both" | "write" | "read"
 _C.phase_key_alpha = 1.0              # float scalar; initial value when learnable
 _C.phase_key_alpha_learnable = False  # when True, alpha becomes an nn.Parameter
 
+# When True with use_memory=True: skip mvt1/mvt2 freeze loops and enable
+# rot/grip/collision losses alongside trans. SAM2 image encoder freeze is
+# independent. No-op when use_memory=False.
+_C.memory_full_finetune = False
+
 def get_cfg_defaults():
     """Get a yacs CfgNode object with default values for my_project."""
     return _C.clone()
