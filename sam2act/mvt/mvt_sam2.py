@@ -284,6 +284,11 @@ class MVT_SAM2(nn.Module):
                 # step_idx).
                 mvt2_args = dict(args)
                 mvt2_args["use_phase_keyed_memory"] = False
+                # mvt2 has no memory bank, so phase anchors are meaningless on
+                # it and its anchor detector would demand step_idx that the
+                # mvt2 forward call does not receive (eval-time AssertionError,
+                # regression of the id94 fix). Force-disable.
+                mvt2_args["use_phase_anchors"] = False
                 # mvt2 has no memory bank, so object pointers would be
                 # unreachable from it. Force-disable to prevent the CLIP
                 # encoder and obj_ptr_proj from being constructed twice

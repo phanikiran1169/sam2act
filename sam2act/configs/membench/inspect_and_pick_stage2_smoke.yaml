@@ -1,0 +1,28 @@
+# inspect_and_pick_stage2_smoke.yaml: 1-epoch smoke-test config for obj-pointers Stage 2.
+# inspect_and_pick_stage2_smoke.yaml: Identical to inspect_and_pick_stage2.yaml except epochs=1.
+
+# Task
+task: inspect_and_pick
+stage: 2
+
+# Training hyperparameters
+bs: 10
+epochs: 1
+base_lr: 1.25e-5
+steps_per_epoch: 625
+warmup_steps: 2000
+
+# Model config
+use_memory: true
+num_maskmem: 9
+
+# Data
+sample_distribution_mode: demo_uniform_temporal
+
+# Scripts
+train_script: train_plus.py
+exp_cfg: configs/sam2act_plus.yaml
+mvt_cfg: mvt/configs/sam2act_plus_obj_pointers.yaml
+
+# Seed
+seed: 42
