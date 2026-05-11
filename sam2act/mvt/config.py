@@ -88,6 +88,17 @@ _C.anchor_detect_step_emb_delta = True     # cosine-delta on step embedding trig
 _C.anchor_step_emb_delta_threshold = 0.15  # cosine-distance threshold for the delta
 _C.anchor_settle_frames = 2                # frames the candidate phase must hold
 
+# Object-pointer memory (Stage 2). Restores SAM2's semantic stream that
+# SAM2Act+ disabled. Stores a CLIP-derived content embedding per memory
+# slot alongside the spatial heatmap features so memory attention can
+# key on identity (D2) in addition to space (D1). No-op when
+# use_object_pointers is False.
+_C.use_object_pointers = False
+_C.obj_ptr_clip_model = "RN50"     # CLIP backbone for the pointer source
+_C.obj_ptr_crop_size = 64          # square crop side (in source-image pixels)
+_C.obj_ptr_num_tokens = 4          # tokens per pointer: 256-dim / 64 mem-dim
+_C.obj_ptr_dim = 256               # total pointer dim (split into num_tokens × mem_dim)
+
 def get_cfg_defaults():
     """Get a yacs CfgNode object with default values for my_project."""
     return _C.clone()

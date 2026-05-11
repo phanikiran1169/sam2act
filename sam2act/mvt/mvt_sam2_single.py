@@ -161,6 +161,11 @@ class MVT_SAM2_Single(nn.Module):
         anchor_detect_step_emb_delta=True,
         anchor_step_emb_delta_threshold=0.15,
         anchor_settle_frames=2,
+        use_object_pointers=False,
+        obj_ptr_clip_model="RN50",
+        obj_ptr_crop_size=64,
+        obj_ptr_num_tokens=4,
+        obj_ptr_dim=256,
         renderer_device="cuda:0",
         renderer=None,
         no_feat=False,
@@ -453,6 +458,53 @@ class MVT_SAM2_Single(nn.Module):
         self._prev_step_emb = None
         self._current_proprio = None
 
+        # Object-pointer memory (Stage 2). Restores SAM2's semantic stream
+        # by encoding the RGB crop at the heatmap peak with a frozen CLIP
+        # image encoder and storing the resulting tokens alongside each
+        # memory slot. The only trainable module on this pathway is a
+        # small projector from CLIP's output dim down to (num_tokens × 64).
+        self.use_object_pointers = use_object_pointers
+        self.obj_ptr_crop_size = obj_ptr_crop_size
+        self.obj_ptr_num_tokens = obj_ptr_num_tokens
+        self.obj_ptr_dim = obj_ptr_dim
+        # Raw RGB stash filled in forward() before SAM2 fusion overwrites it.
+        self._rgb_for_memory = None
+        if self.use_object_pointers:
+            import clip  # local import: only loaded when feature is enabled
+            assert obj_ptr_num_tokens * 64 == obj_ptr_dim, (
+                f"obj_ptr_dim ({obj_ptr_dim}) must equal "
+                f"obj_ptr_num_tokens ({obj_ptr_num_tokens}) × 64 (mem_dim)"
+            )
+            clip_model, clip_preprocess = clip.load(
+                obj_ptr_clip_model, device="cpu"
+            )
+            clip_model.eval()
+            for p in clip_model.parameters():
+                p.requires_grad = False
+            # Stash both the visual encoder and the preprocess pipeline.
+            # The preprocess callable expects a PIL image; we apply its
+            # numeric ops (resize + ImageNet normalize) ourselves on GPU
+            # tensors via _obj_ptr_normalize() below.
+            self._clip_visual = clip_model.visual
+            # CLIP RN50 visual output dim is 1024; ViT-B/32 is 512. Read
+            # the actual output dim from the loaded model so we project to
+            # the right shape regardless of backbone choice.
+            clip_out_dim = clip_model.visual.output_dim
+            self.obj_ptr_proj = nn.Linear(clip_out_dim, obj_ptr_dim)
+            # ImageNet stats (matches CLIP's preprocess transforms).
+            self.register_buffer(
+                "_clip_mean",
+                torch.tensor([0.48145466, 0.4578275, 0.40821073]).view(1, 3, 1, 1),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_clip_std",
+                torch.tensor([0.26862954, 0.26130258, 0.27577711]).view(1, 3, 1, 1),
+                persistent=False,
+            )
+            # CLIP-RN50 input resolution is 224×224 (clip_model.visual.input_resolution).
+            self._clip_input_resolution = clip_model.visual.input_resolution
+
         self.patchify = Conv2DBlock(
             7 if self.ifsep else 10,
             self.feat_img_dim,
@@ -699,6 +751,10 @@ class MVT_SAM2_Single(nn.Module):
             self._settle_counter = 0
             self._prev_gripper_state = None
             self._prev_step_emb = None
+        # Object-pointer per-episode state reset. The stashed RGB is freshly
+        # set in forward() each step, but clearing here avoids holding a
+        # stale GPU tensor across episode resets.
+        self._rgb_for_memory = None
 
     def _detect_phase_transition(self, idx):
         """Return True if a phase transition was detected at keyframe `idx`.
@@ -775,6 +831,11 @@ class MVT_SAM2_Single(nn.Module):
             if has_fifo or has_anchors:
                 to_cat_memory = []
                 to_cat_memory_pos_embed = []
+                # Object-pointer tokens collected from every visited slot.
+                # These get concatenated AFTER all spatial tokens so the
+                # memory_attention's num_k_exclude_rope mechanism (which
+                # excludes the LAST N keys from RoPE) targets them exactly.
+                to_cat_obj_ptrs = []
 
                 if has_fifo:
                     num_mem = min(len(memory_bank_list), net.num_maskmem)
@@ -796,18 +857,48 @@ class MVT_SAM2_Single(nn.Module):
                             maskmem_enc + net.maskmem_tpos_enc[t_pos - 1]
                         )
                         to_cat_memory_pos_embed.append(maskmem_enc)
+                        # Bank entries are now 3-element [memory, memory_pos,
+                        # obj_ptr]. The third slot is None when the flag is
+                        # off, so a defensive len-check keeps backward-compat
+                        # with any legacy 2-element entry that escaped reset.
+                        if len(prev) >= 3 and prev[2] is not None:
+                            to_cat_obj_ptrs.append(prev[2].cuda())
 
                 if has_anchors:
                     # Anchors are concatenated AFTER FIFO. memory_attention is
                     # order-agnostic at the dot-product level — entries are
                     # differentiated only via memory_pos (FIFO: recency tag;
                     # anchors: anchor_tpos_enc[slot] already baked into pos).
-                    for anchor_slot, (feat, pos) in sorted(anchor_bank.items()):
+                    for anchor_slot, entry in sorted(anchor_bank.items()):
+                        feat = entry[0]
+                        pos = entry[1]
                         to_cat_memory.append(feat.cuda())
                         to_cat_memory_pos_embed.append(pos.cuda())
+                        if len(entry) >= 3 and entry[2] is not None:
+                            to_cat_obj_ptrs.append(entry[2].cuda())
 
                 memory_fused = torch.cat(to_cat_memory, dim=0)
                 memory_pos_fused = torch.cat(to_cat_memory_pos_embed, dim=0)
+
+                # Append object-pointer tokens AFTER spatial tokens. They
+                # carry semantic identity (color, object class) and must NOT
+                # receive RoPE — memory_attention handles this by excluding
+                # the last `num_obj_ptr_tokens` keys from the rotary embedding
+                # (see memory_attention.py num_k_exclude_rope).
+                num_obj_ptr_tokens = 0
+                if self.use_object_pointers and len(to_cat_obj_ptrs) > 0:
+                    obj_ptrs_cat = torch.cat(to_cat_obj_ptrs, dim=0)  # [N*4, 1, 64]
+                    # Pointer positions: zeros (no spatial pos for pointers —
+                    # RoPE is bypassed anyway). dtype/device match the spatial
+                    # memory_pos so torch.cat is a no-op cast.
+                    obj_ptrs_pos = torch.zeros_like(obj_ptrs_cat).to(memory_pos_fused.dtype)
+                    memory_fused = torch.cat(
+                        [memory_fused, obj_ptrs_cat.to(memory_fused.dtype)], dim=0
+                    )
+                    memory_pos_fused = torch.cat(
+                        [memory_pos_fused, obj_ptrs_pos], dim=0
+                    )
+                    num_obj_ptr_tokens = obj_ptrs_cat.shape[0]
 
                 '''memory attention'''
 
@@ -837,7 +928,7 @@ class MVT_SAM2_Single(nn.Module):
                     curr_pos=[curr_pos_read],
                     memory=memory_fused,
                     memory_pos=memory_pos_fused,
-                    num_obj_ptr_tokens=0
+                    num_obj_ptr_tokens=num_obj_ptr_tokens,
                 )
 
             else:
@@ -854,6 +945,83 @@ class MVT_SAM2_Single(nn.Module):
         final_image_embeds = image_embeds.to(GPUdevice)
 
         return final_image_embeds
+
+    def _obj_ptr_normalize(self, rgb_crop):
+        """Apply CLIP's ImageNet normalization to a [B, 3, H, W] tensor.
+
+        Inputs are expected in [0, 1]; output matches what CLIP's preprocess
+        pipeline produces after ToTensor() + Normalize(). The resize happens
+        in _compute_obj_ptr; this helper is only the normalize step.
+        """
+        return (rgb_crop - self._clip_mean) / self._clip_std
+
+    def _compute_obj_ptr(self, idx, view_idx, num_views, hm_frame):
+        """Compute the 4-token object-pointer for the current frame+view.
+
+        Crop the stashed raw RGB at the heatmap argmax, resize to CLIP's
+        input resolution (224), normalize, encode with the frozen CLIP
+        visual encoder, project to obj_ptr_dim, reshape to
+        [num_tokens, 1, mem_dim] so it can be concatenated alongside the
+        spatial memory tensor.
+
+        Returns a tensor of shape [num_tokens, 1, 64] or None if RGB
+        isn't available (e.g. flag disabled or forward() not yet called
+        in this episode).
+        """
+        if self._rgb_for_memory is None:
+            return None
+        # _rgb_for_memory shape: [bs*num_img, 3, H, W] stashed in forward()
+        # before resize/fusion. The outer batch index for THIS sample +
+        # view is the same layout sam2_add_new_memory uses for vision_feats.
+        batch_view_idx = idx * num_views + view_idx
+        rgb = self._rgb_for_memory[batch_view_idx : batch_view_idx + 1]  # [1,3,H,W]
+        _, _, H, W = rgb.shape
+
+        # Locate the heatmap peak. hm_frame shape: [1, 1, h, w] (the per-view
+        # heatmap before high-res interpolation). Argmax over the spatial
+        # dims gives a (row, col) we rescale to RGB pixels.
+        hm_flat = hm_frame.reshape(-1)
+        peak = torch.argmax(hm_flat)
+        h_hm, w_hm = hm_frame.shape[-2], hm_frame.shape[-1]
+        peak_row = (peak // w_hm).item()
+        peak_col = (peak % w_hm).item()
+        # Scale to RGB pixel coords.
+        row_px = int(peak_row * H / h_hm)
+        col_px = int(peak_col * W / w_hm)
+
+        half = self.obj_ptr_crop_size // 2
+        r0 = max(0, row_px - half)
+        c0 = max(0, col_px - half)
+        r1 = min(H, r0 + self.obj_ptr_crop_size)
+        c1 = min(W, c0 + self.obj_ptr_crop_size)
+        # Clamp to keep the crop at the requested size when near borders.
+        if r1 - r0 < self.obj_ptr_crop_size:
+            r0 = max(0, r1 - self.obj_ptr_crop_size)
+        if c1 - c0 < self.obj_ptr_crop_size:
+            c0 = max(0, c1 - self.obj_ptr_crop_size)
+        crop = rgb[:, :, r0:r1, c0:c1]  # [1, 3, crop_size, crop_size]
+
+        # Resize to CLIP's expected input resolution. CLIP's official
+        # preprocess pipeline uses bicubic interpolation
+        # (libs/peract/helpers/clip/core/clip.py); using bilinear would
+        # systematically shift embeddings away from the CLIP feature space.
+        crop = F.interpolate(
+            crop,
+            size=(self._clip_input_resolution, self._clip_input_resolution),
+            mode="bicubic",
+            align_corners=False,
+        )
+        crop = self._obj_ptr_normalize(crop)
+
+        # Frozen forward through CLIP visual encoder.
+        with torch.no_grad():
+            crop = crop.to(next(self._clip_visual.parameters()).dtype)
+            clip_feat = self._clip_visual(crop)  # [1, clip_out_dim]
+
+        # Project to obj_ptr_dim (256) then reshape into 4 mem-dim tokens.
+        obj_ptr = self.obj_ptr_proj(clip_feat.to(self.obj_ptr_proj.weight.dtype))
+        obj_ptr_tokens = obj_ptr.view(self.obj_ptr_num_tokens, 1, 64)
+        return obj_ptr_tokens
 
     def sam2_add_new_memory(self, net, hm, idx, num_views, feat_sizes):
         GPUdevice = self.rank
@@ -934,9 +1102,21 @@ class MVT_SAM2_Single(nn.Module):
                 # rather than aliasing one that later writes could mutate.
                 memory_pos = memory_pos + self.phase_key_alpha * phase_mem.view(1, 1, 64)
 
+            # Compute object-pointer (or None when disabled). Same crop is
+            # used for both the FIFO write and any concurrent anchor write,
+            # so we compute once per view per frame.
+            obj_ptr_tokens = None
+            if self.use_object_pointers:
+                obj_ptr_tokens = self._compute_obj_ptr(
+                    idx, view_idx, num_views, hm[0, view_idx, :, :, :, :]
+                )
+
             memory_bank_list = self.memory_bank_multiview[view_idx]
 
-            memory_bank_list[self.curr_obs_idx] = [memory, memory_pos]
+            # Bank entries are always 3-element [memory, memory_pos, obj_ptr].
+            # obj_ptr is None when use_object_pointers is False; the read
+            # path handles both cases.
+            memory_bank_list[self.curr_obs_idx] = [memory, memory_pos, obj_ptr_tokens]
 
             # Per-view phase-anchor write. Uses the already-phase-keyed
             # memory_pos so the anchor inherits its creation-phase tag, plus
@@ -951,9 +1131,13 @@ class MVT_SAM2_Single(nn.Module):
                 # clone() preserves autograd lineage; we intentionally DO NOT
                 # detach so anchor_tpos_enc and the encoder weights receive
                 # gradient when this anchor is retrieved later in the episode.
+                anchor_ptr = (
+                    obj_ptr_tokens.clone() if obj_ptr_tokens is not None else None
+                )
                 self._anchor_bank_multiview[view_idx][anchor_commit_slot] = [
                     memory.clone(),
                     anchor_pos.clone(),
+                    anchor_ptr,
                 ]
 
         # --- Frame-scope phase counter advance after all views wrote ---
@@ -1021,13 +1205,21 @@ class MVT_SAM2_Single(nn.Module):
 
         # if True:  # use SAM
         rgb_img = img[:,3:6]
-        
+
+        # Stash raw RGB BEFORE resize/fusion so sam2_add_new_memory can
+        # crop it for CLIP encoding. Shape here is [bs*num_img, 3, h, w]
+        # with values in roughly [0, 1] from the image pipeline. Detach
+        # to keep gradients clean (CLIP is frozen anyway). Guarded so the
+        # flag-off path holds no extra GPU references.
+        if self.use_object_pointers:
+            self._rgb_for_memory = rgb_img.detach().clone()
+
         # rgb_img = img[:,3:6]
         # rgb_clip = True
         # if rgb_clip:
         #     rgb_img[rgb_img<0] = 0
-        #     rgb_img[rgb_img>1] = 1 
-            
+        #     rgb_img[rgb_img>1] = 1
+
         if self.resize_rgb:
             # import pdb;pdb.set_trace()
             rgb_img = F.interpolate(rgb_img, size=(256, 256), mode='bilinear', align_corners=True)

@@ -32,12 +32,16 @@ class SAM2Custom(SAM2Base):
     ):
         super().__init__(**kwargs)
         self.num_maskmem = num_maskmem
-        
+
         self.non_overlap_masks = non_overlap_masks
         self.clear_non_cond_mem_around_input = clear_non_cond_mem_around_input
         self.clear_non_cond_mem_for_multi_obj = clear_non_cond_mem_for_multi_obj
-        
-        self.use_obj_ptrs_in_encoder = False
+
+        # use_obj_ptrs_in_encoder is now controlled by SAM2Base.__init__ via
+        # kwargs (default False there too). The hardcoded override here was
+        # the gate that prevented restoring SAM2's semantic stream in
+        # SAM2Act+. Leaving it to the base class lets callers flip it via
+        # build_sam2_custom_select / build args.
         self.use_mask_input_as_output_without_sam = True
 
         self.maskmem_tpos_enc = torch.nn.Parameter(

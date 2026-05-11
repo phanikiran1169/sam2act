@@ -107,6 +107,11 @@ class MVT_SAM2(nn.Module):
         anchor_detect_step_emb_delta=True,
         anchor_step_emb_delta_threshold=0.15,
         anchor_settle_frames=2,
+        use_object_pointers=False,
+        obj_ptr_clip_model="RN50",
+        obj_ptr_crop_size=64,
+        obj_ptr_num_tokens=4,
+        obj_ptr_dim=256,
         renderer_device="cuda:0",
     ):
         """MultiView Transfomer
@@ -156,6 +161,11 @@ class MVT_SAM2(nn.Module):
         # When True, step_embedder MLP stays trainable under Stage 2.
         self.train_step_embedder = train_step_embedder
         self.use_phase_anchors = use_phase_anchors
+        # Object-pointer memory: restores SAM2's semantic stream so the
+        # memory bank can carry identity (e.g. color) per slot in addition
+        # to spatial action heatmaps. The freeze filter below keeps the
+        # obj_ptr projector trainable while CLIP itself stays frozen.
+        self.use_object_pointers = use_object_pointers
 
         # for verifying the input
         self.feat_ver = feat_ver
@@ -197,7 +207,12 @@ class MVT_SAM2(nn.Module):
                                             num_maskmem=self.num_maskmem,
                                             memory_in_dim=128)
             sam2.num_maskmem = self.num_maskmem
-            sam2.use_obj_ptrs_in_encoder = False
+            # Restore SAM2's object-pointer stream when enabled. SAM2Act+
+            # originally hardcoded this to False, blocking semantic memory
+            # (paper §6: "appears to be limited to storing spatial
+            # information"). We gate it on the use_object_pointers flag so
+            # the bit-identity contract holds when the flag is off.
+            sam2.use_obj_ptrs_in_encoder = use_object_pointers
             sam2.use_mask_input_as_output_without_sam = True
 
             if self.lora_finetune:
@@ -252,6 +267,10 @@ class MVT_SAM2(nn.Module):
                             )
                         )
                         or (self.use_phase_anchors and "anchor" in name)
+                        or (
+                            self.use_object_pointers
+                            and "obj_ptr_proj" in name
+                        )
                     )
                     if not trainable:
                         param.requires_grad = False
@@ -265,6 +284,11 @@ class MVT_SAM2(nn.Module):
                 # step_idx).
                 mvt2_args = dict(args)
                 mvt2_args["use_phase_keyed_memory"] = False
+                # mvt2 has no memory bank, so object pointers would be
+                # unreachable from it. Force-disable to prevent the CLIP
+                # encoder and obj_ptr_proj from being constructed twice
+                # (would create an untrained second projector on mvt2).
+                mvt2_args["use_object_pointers"] = False
                 self.mvt2 = MVT_SAM2_Single(
                     **mvt2_args,
                     renderer=self.renderer,
